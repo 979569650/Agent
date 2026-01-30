@@ -1,0 +1,10 @@
+openai
+python-dotenv
+langchain
+langchain-community
+langchain-huggingface
+faiss-cpu
+# 依赖修正
+sentence-transformers
+huggingface-hub>=0.33.4,<1.0.0
+transformers<5.0.0

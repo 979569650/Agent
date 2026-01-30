@@ -1,5 +1,6 @@
 import os
 import operator
+import hashlib
 from typing import Annotated, TypedDict, List
 from dotenv import load_dotenv
 
@@ -40,8 +41,21 @@ if not rag.load_index():
     rag.build_index()
 
 # ==========================================
-# 2. 定义工具 (Tools) - Agent 的“手”
+# 2. 定义工具 (Tools) - Agent 的"手"
 # ==========================================
+
+def verify_security_key(user_input: str) -> bool:
+    """
+    验证用户输入的安全密钥
+    使用SHA256哈希比对，避免明文存储和传输
+    """
+    expected_hash = os.getenv("SECURITY_KEY_HASH")
+    if not expected_hash:
+        print("⚠️ 安全密钥哈希未配置")
+        return False
+    
+    user_hash = hashlib.sha256(user_input.encode()).hexdigest()
+    return user_hash == expected_hash
 
 
 @tool
@@ -51,6 +65,35 @@ def search_notes(query: str) -> str:
     当用户问及个人记录、之前的想法、项目构思、已有知识或**账号密码**等隐私信息时，必须优先使用此工具。
     """
     print(f"\n🔍 [Tool] 正在检索本地笔记: {query}")
+    
+    # 检测密码相关查询的关键词
+    password_keywords = ["密码", "password", "密钥", "key", "账号", "account", "登录", "login"]
+    query_lower = query.lower()
+    is_password_query = any(keyword in query_lower for keyword in password_keywords)
+    
+    # 如果是密码相关查询，需要安全验证
+    if is_password_query:
+        print("⚠️ 检测到密码相关查询，需要安全验证")
+        print("请输入安全密钥（输入'cancel'取消查询）：")
+        
+        try:
+            user_key = input("安全密钥: ").strip()
+            
+            # 允许用户取消查询
+            if user_key.lower() == "cancel":
+                return "查询已取消。"
+            
+            # 验证安全密钥
+            if not verify_security_key(user_key):
+                return "❌ 没有获取密码的权限。安全密钥验证失败。"
+            
+            print("✅ 安全密钥验证通过")
+        except KeyboardInterrupt:
+            return "查询被用户中断。"
+        except Exception as e:
+            return f"❌ 安全验证过程中发生错误: {str(e)}"
+    
+    # 执行实际搜索
     context = rag.search(query)
     if not context:
         return "本地笔记中没有找到相关内容。"

@@ -1,8 +1,9 @@
 import os
-import hashlib
+import shutil
 import json
 import base64
 import mimetypes
+import time
 from pathlib import Path
 
 # 必须在导入 transformers/huggingface 之前设置镜像源
@@ -21,6 +22,16 @@ from PIL import Image
 from sentence_transformers import SentenceTransformer
 from rapidocr_onnxruntime import RapidOCR
 import requests
+from infra.retrieval.search_pipeline import build_ranked_context
+from infra.retrieval.storage_utils import (
+    atomic_write_json,
+    collect_hashes,
+    create_db_snapshot,
+    index_lock,
+    read_recovery_marker,
+    restore_db_snapshot,
+    write_recovery_marker,
+)
 
 
 class RAGEngine:
@@ -42,6 +53,9 @@ class RAGEngine:
         self.image_index_file = os.path.join(db_path, "image_clip.faiss")
         self.image_meta_file = os.path.join(db_path, "image_clip_meta.json")
         self.image_text_note_file = os.path.join(db_path, "image_text_notes.json")
+        self.lock_file = os.path.join(db_path, ".index.lock")
+        self.recovery_marker_file = os.path.join(db_path, ".recovery.json")
+        self.snapshot_dir = os.path.join(db_path, ".snapshot")
         self.embedding_model = os.getenv(
             "EMBEDDING_MODEL", "shibing624/text2vec-base-chinese"
         )
@@ -64,6 +78,34 @@ class RAGEngine:
         self._init_embeddings()
         self._init_image_embeddings()
         self._init_ocr_engine()
+        self._recover_if_needed()
+
+    def _recover_if_needed(self) -> None:
+        marker = read_recovery_marker(self.recovery_marker_file)
+        if not marker:
+            return
+
+        if marker.get("status") != "in_progress":
+            return
+
+        print("⚠️ [RAG] 检测到上次索引构建可能异常中断，开始恢复快照...")
+        restored = restore_db_snapshot(
+            self.snapshot_dir,
+            self.db_path,
+            preserve_names={".index.lock", ".recovery.json", ".snapshot"},
+        )
+        if restored:
+            write_recovery_marker(
+                self.recovery_marker_file,
+                {"status": "recovered", "from": marker, "recovered_at": int(time.time())},
+            )
+            print("✅ [RAG] 索引快照恢复完成。")
+        else:
+            write_recovery_marker(
+                self.recovery_marker_file,
+                {"status": "recovery_failed", "from": marker, "recovered_at": int(time.time())},
+            )
+            print("❌ [RAG] 索引快照恢复失败，请手动执行 update 触发重建。")
 
     def _init_embeddings(self) -> bool:
         """初始化 Embedding 模型。失败时返回 False，不抛出异常。"""
@@ -201,32 +243,9 @@ class RAGEngine:
             print(f"⚠️ [RAG] 图片语义理解异常: {os.path.basename(image_path)} - {e}")
             return ""
 
-    def _calculate_file_hash(self, filepath: str) -> str:
-        """计算单个文件的 MD5 哈希值"""
-        hasher = hashlib.md5()
-        with open(filepath, 'rb') as f:
-            buf = f.read()
-            hasher.update(buf)
-        return hasher.hexdigest()
-
     def _get_current_hashes(self) -> Dict[str, str]:
         """扫描目录，获取当前所有文件的哈希值"""
-        current_hashes = {}
-        if not os.path.exists(self.data_dir):
-            return current_hashes
-            
-        for root, dirs, files in os.walk(self.data_dir):
-            for file in files:
-                ext = Path(file).suffix.lower()
-                if ext in self.TEXT_EXTS or ext in self.IMAGE_EXTS:
-                    file_path = os.path.join(root, file)
-                    # 使用相对路径作为 Key，避免绝对路径变化导致的问题
-                    rel_path = os.path.relpath(file_path, self.data_dir)
-                    try:
-                        current_hashes[rel_path] = self._calculate_file_hash(file_path)
-                    except Exception as e:
-                        print(f"⚠️ 无法读取文件哈希: {file} - {e}")
-        return current_hashes
+        return collect_hashes(self.data_dir, self.TEXT_EXTS | self.IMAGE_EXTS)
 
     def check_for_updates(self) -> bool:
         """检查是否有文件变动（新增、修改、删除）"""
@@ -262,110 +281,138 @@ class RAGEngine:
 
     def build_index(self):
         """重建索引：文本向量索引 + 图片向量索引"""
-        text_ok = self._init_embeddings()
-        image_ok = self._init_image_embeddings()
-        if not text_ok and not image_ok:
-            print("⚠️ [RAG] 跳过索引构建：文本与图片向量模型均不可用。")
-            return
+        with index_lock(self.db_path, self.lock_file):
+            os.makedirs(self.db_path, exist_ok=True)
+            create_db_snapshot(
+                self.db_path,
+                self.snapshot_dir,
+                exclude_names={".index.lock", ".recovery.json", ".snapshot"},
+            )
+            write_recovery_marker(
+                self.recovery_marker_file,
+                {"status": "in_progress", "started_at": int(time.time())},
+            )
 
-        print("📚 [RAG] 正在构建/重建索引...")
+            success = False
+            text_ok = self._init_embeddings()
+            image_ok = self._init_image_embeddings()
+            if not text_ok and not image_ok:
+                print("⚠️ [RAG] 跳过索引构建：文本与图片向量模型均不可用。")
+                write_recovery_marker(
+                    self.recovery_marker_file,
+                    {"status": "skipped", "reason": "both_models_unavailable", "finished_at": int(time.time())},
+                )
+                return
 
-        docs = []
-        image_files: List[str] = []
-        image_text_notes: Dict[str, Dict[str, str]] = {}
-        # 手动遍历目录，确保编码控制 (Windows下 UTF-8 兼容性)
-        if not os.path.exists(self.data_dir):
-            os.makedirs(self.data_dir)
+            print("📚 [RAG] 正在构建/重建索引...")
 
-        for root, dirs, files in os.walk(self.data_dir):
-            for file in files:
-                file_path = os.path.join(root, file)
-                ext = Path(file).suffix.lower()
+            try:
+                docs = []
+                image_files: List[str] = []
+                image_text_notes: Dict[str, Dict[str, str]] = {}
+                if not os.path.exists(self.data_dir):
+                    os.makedirs(self.data_dir)
 
-                if ext in self.TEXT_EXTS and text_ok:
+                for root, dirs, files in os.walk(self.data_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        ext = Path(file).suffix.lower()
+
+                        if ext in self.TEXT_EXTS and text_ok:
+                            try:
+                                loader = TextLoader(file_path, encoding="utf-8")
+                                docs.extend(loader.load())
+                                print(f"  ✅ 文本加载成功: {file}")
+                            except UnicodeDecodeError:
+                                try:
+                                    loader = TextLoader(file_path, encoding="gbk")
+                                    docs.extend(loader.load())
+                                    print(f"  ✅ 文本加载成功 (GBK): {file}")
+                                except Exception as e:
+                                    print(f"  ❌ 文本加载失败 (编码问题): {file} - {e}")
+                            except Exception as e:
+                                print(f"  ❌ 文本加载失败: {file} - {e}")
+
+                        if ext in self.IMAGE_EXTS and image_ok:
+                            image_files.append(file_path)
+                            rel_path = os.path.relpath(file_path, self.data_dir)
+                            image_text_notes.setdefault(rel_path, {"vlm": "", "ocr": ""})
+
+                            if text_ok and self.enable_image_vlm:
+                                vlm_text = self._describe_image_with_vlm(file_path)
+                                if vlm_text:
+                                    docs.append(
+                                        Document(
+                                            page_content=f"[图片语义理解]\n{vlm_text}",
+                                            metadata={"source": rel_path, "type": "image_vlm"},
+                                        )
+                                    )
+                                    image_text_notes[rel_path]["vlm"] = vlm_text
+                                    print(f"  ✅ 图片语义理解成功并入库: {rel_path}")
+                                else:
+                                    print(f"  ⚠️ 图片语义理解无结果: {rel_path}")
+
+                            if text_ok and self.enable_image_ocr:
+                                ocr_text = self._extract_image_text(file_path)
+                                if ocr_text:
+                                    docs.append(
+                                        Document(
+                                            page_content=f"[图片OCR内容]\n{ocr_text}",
+                                            metadata={"source": rel_path, "type": "image_ocr"},
+                                        )
+                                    )
+                                    image_text_notes[rel_path]["ocr"] = ocr_text
+                                    print(f"  ✅ 图片OCR成功并入库: {rel_path}")
+                                else:
+                                    print(f"  ⚠️ 图片OCR无文本: {rel_path}")
+
+                if docs and text_ok:
+                    print(f"📄 加载了 {len(docs)} 个文档。正在切分...")
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+                    splits = text_splitter.split_documents(docs)
+
+                    print(f"🔢 切分出 {len(splits)} 个文本片段。正在向量化...")
+                    self.vector_store = FAISS.from_documents(splits, self.embeddings)
+                    self.vector_store.save_local(self.db_path)
+                elif text_ok:
+                    print("⚠️ 未找到可索引文本（.md/.txt），跳过文本索引。")
+
+                self._build_image_index(image_files)
+                self._save_image_text_notes(image_text_notes)
+
+                current_hashes = self._get_current_hashes()
+                atomic_write_json(self.hash_file, current_hashes)
+                print("✅ 索引构建完成并已保存！(Hash Updated)")
+                success = True
+            except Exception as e:
+                print(f"❌ 索引构建失败，尝试回滚: {e}")
+                restored = restore_db_snapshot(
+                    self.snapshot_dir,
+                    self.db_path,
+                    preserve_names={".index.lock", ".recovery.json", ".snapshot"},
+                )
+                write_recovery_marker(
+                    self.recovery_marker_file,
+                    {
+                        "status": "rollback_done" if restored else "rollback_failed",
+                        "error": f"{type(e).__name__}: {e}",
+                        "finished_at": int(time.time()),
+                    },
+                )
+                raise
+            finally:
+                if success:
+                    write_recovery_marker(
+                        self.recovery_marker_file,
+                        {"status": "success", "finished_at": int(time.time())},
+                    )
                     try:
-                        # 尝试 UTF-8 加载
-                        loader = TextLoader(file_path, encoding="utf-8")
-                        docs.extend(loader.load())
-                        print(f"  ✅ 文本加载成功: {file}")
-                    except UnicodeDecodeError:
-                        try:
-                            # 失败则尝试 GBK (兼容 Windows 旧文件)
-                            loader = TextLoader(file_path, encoding="gbk")
-                            docs.extend(loader.load())
-                            print(f"  ✅ 文本加载成功 (GBK): {file}")
-                        except Exception as e:
-                            print(f"  ❌ 文本加载失败 (编码问题): {file} - {e}")
-                    except Exception as e:
-                        print(f"  ❌ 文本加载失败: {file} - {e}")
-
-                if ext in self.IMAGE_EXTS and image_ok:
-                    image_files.append(file_path)
-                    rel_path = os.path.relpath(file_path, self.data_dir)
-                    image_text_notes.setdefault(rel_path, {"vlm": "", "ocr": ""})
-
-                    # 1) 多模态大模型语义理解入库（优先）
-                    if text_ok and self.enable_image_vlm:
-                        vlm_text = self._describe_image_with_vlm(file_path)
-                        if vlm_text:
-                            rel_path = os.path.relpath(file_path, self.data_dir)
-                            docs.append(
-                                Document(
-                                    page_content=f"[图片语义理解]\n{vlm_text}",
-                                    metadata={
-                                        "source": rel_path,
-                                        "type": "image_vlm",
-                                    },
-                                )
-                            )
-                            image_text_notes[rel_path]["vlm"] = vlm_text
-                            print(f"  ✅ 图片语义理解成功并入库: {rel_path}")
-                        else:
-                            print(f"  ⚠️ 图片语义理解无结果: {os.path.relpath(file_path, self.data_dir)}")
-
-                    # 2) OCR 作为补充文本入库（可关闭）
-                    if text_ok and self.enable_image_ocr:
-                        ocr_text = self._extract_image_text(file_path)
-                        if ocr_text:
-                            rel_path = os.path.relpath(file_path, self.data_dir)
-                            docs.append(
-                                Document(
-                                    page_content=f"[图片OCR内容]\n{ocr_text}",
-                                    metadata={
-                                        "source": rel_path,
-                                        "type": "image_ocr",
-                                    },
-                                )
-                            )
-                            image_text_notes[rel_path]["ocr"] = ocr_text
-                            print(f"  ✅ 图片OCR成功并入库: {rel_path}")
-                        else:
-                            print(f"  ⚠️ 图片OCR无文本: {os.path.relpath(file_path, self.data_dir)}")
-
-        # 构建文本索引
-        if docs and text_ok:
-            print(f"📄 加载了 {len(docs)} 个文档。正在切分...")
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-            splits = text_splitter.split_documents(docs)
-
-            print(f"🔢 切分出 {len(splits)} 个文本片段。正在向量化...")
-            self.vector_store = FAISS.from_documents(splits, self.embeddings)
-            self.vector_store.save_local(self.db_path)
-        elif text_ok:
-            print("⚠️ 未找到可索引文本（.md/.txt），跳过文本索引。")
-
-        # 构建图片索引
-        self._build_image_index(image_files)
-        self._save_image_text_notes(image_text_notes)
-        
-        # 保存新的文件哈希记录
-        current_hashes = self._get_current_hashes()
-        try:
-            with open(self.hash_file, 'w', encoding='utf-8') as f:
-                json.dump(current_hashes, f, indent=2, ensure_ascii=False)
-            print("✅ 索引构建完成并已保存！(Hash Updated)")
-        except Exception as e:
-            print(f"⚠️ 索引已保存，但哈希记录写入失败: {e}")
+                        if os.path.exists(self.recovery_marker_file):
+                            os.remove(self.recovery_marker_file)
+                        if os.path.exists(self.snapshot_dir):
+                            shutil.rmtree(self.snapshot_dir, ignore_errors=True)
+                    except Exception:
+                        pass
 
     def _build_image_index(self, image_files: List[str]):
         """构建 CLIP 图片向量索引。"""
@@ -407,8 +454,7 @@ class RAGEngine:
 
         os.makedirs(self.db_path, exist_ok=True)
         faiss.write_index(index, self.image_index_file)
-        with open(self.image_meta_file, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        atomic_write_json(self.image_meta_file, metadata)
 
         self.image_index = index
         self.image_metadata = metadata
@@ -418,9 +464,7 @@ class RAGEngine:
         """保存图片文本资源（VLM/OCR）到本地，便于检索兜底。"""
         self.image_text_notes = notes or {}
         try:
-            os.makedirs(self.db_path, exist_ok=True)
-            with open(self.image_text_note_file, "w", encoding="utf-8") as f:
-                json.dump(self.image_text_notes, f, ensure_ascii=False, indent=2)
+            atomic_write_json(self.image_text_note_file, self.image_text_notes)
         except Exception as e:
             print(f"⚠️ 图片文本资源保存失败: {e}")
 
@@ -620,37 +664,20 @@ class RAGEngine:
 
     def search(self, query: str, k: int = 8, vlm_only: bool = False) -> str:
         """多模态检索接口（文本 + 图片双索引融合）。"""
+        # 召回阶段
         text_hits = self._search_text(query, k=max(2, k - 2))
         image_note_hits = self._search_image_text_notes(query, k=2, vlm_only=vlm_only)
         image_hits = self._search_images(query, k=min(4, k), vlm_only=vlm_only)
 
-        q = (query or "").lower()
-        image_intent = any(x in q for x in ["idcard", "身份证", "图片", "图里", "图像", "照片"])
-
-        context_sections = []
-        # 若问题明显是“图片内容意图”，优先给图片文本资源，避免被大段普通文本淹没
-        if image_intent:
-            if image_note_hits:
-                context_sections.append("\n---\n".join(image_note_hits))
-            if image_hits:
-                context_sections.append("\n---\n".join(image_hits))
-            if text_hits and not vlm_only:
-                context_sections.append("\n---\n".join(text_hits[:2]))
-        else:
-            if text_hits and not vlm_only:
-                context_sections.append("\n---\n".join(text_hits))
-            if image_note_hits:
-                context_sections.append("\n---\n".join(image_note_hits))
-            if image_hits:
-                context_sections.append("\n---\n".join(image_hits))
-
-        if vlm_only and not image_note_hits:
-            context_sections.insert(
-                0,
-                "[系统提示]\n用户要求‘不要OCR，仅用图片语义理解’。当前未检索到可用的图片语义理解文本（VLM）。",
-            )
-
-        full_context = "\n\n==========\n\n".join(context_sections).strip()
+        # 规划/排序阶段（已抽离到 infra.retrieval）
+        full_context = build_ranked_context(
+            query=query,
+            vlm_only=vlm_only,
+            text_hits=text_hits,
+            image_note_hits=image_note_hits,
+            image_hits=image_hits,
+            k=k,
+        )
         if not full_context:
             return ""
 

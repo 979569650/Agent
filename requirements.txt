@@ -12,3 +12,6 @@ numpy
 rapidocr-onnxruntime
 huggingface-hub>=0.33.4,<1.0.0
 transformers<5.0.0
+bcrypt
+opentelemetry-api
+opentelemetry-sdk

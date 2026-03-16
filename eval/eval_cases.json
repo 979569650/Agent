@@ -1,0 +1,42 @@
+[
+  {"id": "smalltalk_hello", "query": "你好", "expected_use_retrieval": false},
+  {"id": "smalltalk_hi", "query": "hi", "expected_use_retrieval": false},
+  {"id": "smalltalk_thanks", "query": "谢谢", "expected_use_retrieval": false},
+  {"id": "smalltalk_morning", "query": "早上好", "expected_use_retrieval": false},
+  {"id": "smalltalk_presence", "query": "在吗", "expected_use_retrieval": false},
+
+  {"id": "retrieve_notes_basic", "query": "帮我检索本地笔记里的 Agent 总结", "expected_use_retrieval": true},
+  {"id": "retrieve_notes_langgraph", "query": "我之前写过 LangGraph 的流程笔记吗", "expected_use_retrieval": true},
+  {"id": "retrieve_notes_summary", "query": "总结一下本地文档里关于RAG优化的内容", "expected_use_retrieval": true},
+  {"id": "retrieve_notes_todo", "query": "查一下我记录的项目TODO", "expected_use_retrieval": true},
+  {"id": "retrieve_notes_review", "query": "回顾一下我最近的学习记录", "expected_use_retrieval": true},
+  {"id": "retrieve_notes_keyword", "query": "搜索含有OpenTelemetry的笔记", "expected_use_retrieval": true},
+  {"id": "retrieve_notes_long_question", "query": "我之前是不是写过关于索引一致性和回滚机制的方案，能不能帮我找出来", "expected_use_retrieval": true},
+
+  {"id": "image_intent_idcard", "query": "看一下身份证图片内容", "expected_use_retrieval": true},
+  {"id": "image_intent_photo", "query": "图像里写了什么", "expected_use_retrieval": true},
+  {"id": "image_intent_picture", "query": "帮我查一下这张图片相关笔记", "expected_use_retrieval": true},
+  {"id": "image_intent_vlm", "query": "不要ocr，按图片语义理解总结", "expected_use_retrieval": true},
+  {"id": "image_intent_ocr", "query": "ocr一下图里的文字", "expected_use_retrieval": true},
+
+  {"id": "doc_intent_material", "query": "本地资料里有提到安全基线吗", "expected_use_retrieval": true},
+  {"id": "doc_intent_extract", "query": "提炼一下我文档里的核心观点", "expected_use_retrieval": true},
+  {"id": "doc_intent_search", "query": "检索一下 data 目录中关于评测的数据", "expected_use_retrieval": true},
+  {"id": "doc_intent_password", "query": "帮我找一下账号密码记录", "expected_use_retrieval": true},
+  {"id": "doc_intent_login", "query": "我有没有记录过登录账号", "expected_use_retrieval": true},
+
+  {"id": "question_long_why", "query": "为什么我这次改造后检索命中率还是不稳定，之前笔记里有分析吗", "expected_use_retrieval": true},
+  {"id": "question_long_how", "query": "如何在当前项目里做更好的索引崩溃恢复流程，有没有旧方案可参考", "expected_use_retrieval": true},
+  {"id": "question_short_nonretrieval_1", "query": "你是谁", "expected_use_retrieval": false},
+  {"id": "question_short_nonretrieval_2", "query": "可以聊天吗", "expected_use_retrieval": false},
+
+  {"id": "list_notes_direct", "query": "本地有什么笔记", "expected_use_retrieval": true},
+  {"id": "list_notes_keyword", "query": "列出笔记", "expected_use_retrieval": true},
+
+  {"id": "mixed_intent_project", "query": "查找我关于项目发布与回滚的记录", "expected_use_retrieval": true},
+  {"id": "mixed_intent_metrics", "query": "搜索延迟、命中率、错误率相关记录", "expected_use_retrieval": true},
+  {"id": "mixed_intent_policy", "query": "本地文档有写输入防注入规则吗", "expected_use_retrieval": true},
+
+  {"id": "smalltalk_ok", "query": "好的", "expected_use_retrieval": false},
+  {"id": "smalltalk_evening", "query": "晚上好", "expected_use_retrieval": false}
+]

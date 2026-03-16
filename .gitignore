@@ -16,3 +16,7 @@ memory.sqlite
 # Temp files
 .git_status.txt
 .DS_Store
+
+# Observability artifacts
+observability/
+eval/reports/

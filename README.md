@@ -20,6 +20,8 @@
 * **框架**: [LangChain](https://www.langchain.com/)
 * **RAG**: [FAISS](https://github.com/facebookresearch/faiss) + HuggingFace Embeddings（文本）+ CLIP（图片）
 * **文件增量检测**: 基于 MD5 哈希
+* **可观测**: 结构化日志 + OpenTelemetry（可选）+ 本地指标看板脚本
+* **安全**: 敏感查询校验、限流、防注入、工具白名单、审计事件
 
 ### 当前调用流程
 
@@ -36,6 +38,7 @@ graph LR
    - 默认走 `/responses`
    - 可切换 `/chat/completions`
    - 失败时输出清晰错误提示，便于定位网关策略/权限问题
+   - 内置网络重试与退避（针对连接抖动、429、5xx）
 
 2. **🧠 本地多模态 RAG 索引**
    - 递归扫描 `data/` 下 `.md/.txt/.png/.jpg/.jpeg/.webp/.bmp`
@@ -45,12 +48,26 @@ graph LR
    - 可选“视觉大模型理解”：直接让多模态 LLM 生成图片语义摘要入库（不仅是 OCR）
    - 支持图片 OCR：图片文字会转为“可切分、可向量化”的文本资源
    - 支持对话级“禁用 OCR”：用户输入“不要ocr/不用ocr/别用ocr”时，切换到 VLM-only 回答
+   - 新增轻量检索质量链路：**query rewrite + 意图过滤 + 轻量 reranker**
+   - 支持**模型级 reranker（可开关）**，不可用时自动降级到规则 reranker
+   - 索引构建支持**快照回滚与崩溃恢复标记**，降低中断/异常导致的损坏风险
 
 3. **🛡️ 启动容错降级**
    - HuggingFace 模型连通失败时，不阻塞主程序启动
 
-4. **🔐 敏感查询安全键校验（可选）**
-   - 账号/密码类查询可要求输入安全密钥（SHA256 对比）
+4. **📊 可观测增强（最小闭环）**
+   - 每轮请求生成 `trace_id`
+   - 结构化 JSON 日志：`request_received / retrieval_done / response_generated`
+   - 内置基础指标快照：请求数、检索命中/未命中、错误率、平均延迟
+   - 可选 OpenTelemetry span（`OTEL_ENABLED=true`）
+   - 支持日志落盘为 JSONL，并通过脚本查看延迟/命中率/错误率
+
+5. **🔐 敏感查询安全键校验（可选）**
+   - 账号/密码类查询可要求输入安全密钥（支持 bcrypt，兼容 SHA256）
+   - 内置敏感查询限流（默认每分钟 3 次）
+   - 输入防注入规则（提示词劫持/越权探测）
+   - 工具白名单策略（限制可执行工具）
+   - 安全审计事件日志（便于事后排查）
 
 ## 🚀 快速开始
 
@@ -146,8 +163,14 @@ python main.py
 
 ### C. 常用指令
 
+- 功能导航：`help` / `h` / `?`
 - 退出：`q` / `quit` / `exit`
 - 强制重建索引：`update`
+- 列出当前可见本地笔记文件：`files`
+- 查看当前关键配置：`config`
+- 查看当前会话指标快照：`metrics`
+
+> 提示：如果你是新用户，建议启动后先输入 `help`，再输入 `files` 快速确认本地数据是否已被识别。
 
 ### D. 常见提示与排错
 
@@ -159,8 +182,10 @@ python main.py
   - 先重试同一问题（网络抖动常见）
   - 将 `.env` 中 `API_MODE=chat` 后重启再测
   - 检查 `BASE_URL`、`MODEL`、Key 权限是否匹配当前网关策略
+  - 可调大 `REQUEST_MAX_RETRIES` 与 `REQUEST_RETRY_BACKOFF_MS`（例如 3 / 800）
   - 必要时提高 `REQUEST_TIMEOUT`（如 60）并执行一次 `update` 重建索引
 - 第一次运行慢：通常是 embedding 下载 + 索引构建导致，属于正常现象。
+- 若多实例同时触发 `update`：当前版本已加入基础文件锁与 JSON 原子写，避免索引脏写。
 
 ## 🔐 安全密钥（可选）
 
@@ -179,13 +204,46 @@ python -c "import hashlib;print(hashlib.sha256('your-key'.encode()).hexdigest())
 - `MODEL`: 单模型名（例如 `gpt-5.3-codex`）
 - `API_MODE`: `responses` 或 `chat`（默认 `responses`）
 - `REQUEST_TIMEOUT`: HTTP 超时时间（秒）
+- `REQUEST_MAX_RETRIES`: 网络重试次数（默认 `2`）
+- `REQUEST_RETRY_BACKOFF_MS`: 重试退避基准毫秒（默认 `500`）
+- `OTEL_ENABLED`: 是否启用 OpenTelemetry（默认 `false`，启用后输出 span）
+- `LOG_FILE`: 结构化日志落盘路径（默认 `observability/events.jsonl`）
+- `ALLOWED_TOOLS`: 工具白名单（逗号分隔，默认 `search_notes,list_note_files`）
+- `RERANKER_ENABLED`: 是否启用模型级 reranker（默认 `false`）
+- `RERANKER_MODEL`: 模型级 reranker 名称（默认 `BAAI/bge-reranker-base`）
 - `IMAGE_EMBEDDING_MODEL`: 图片向量模型（默认 `clip-ViT-B-32`）
 - `VISION_MODEL`: 图片理解用多模态模型（默认跟随 `MODEL`）
 - `ENABLE_IMAGE_VLM`: 是否启用“视觉大模型理解入库”（默认 `true`）
 - `ENABLE_IMAGE_OCR`: 是否启用图片 OCR 入库（默认 `true`）
 - `SECURITY_KEY_HASH`: 敏感查询安全键哈希（可选）
+- `SENSITIVE_QUERY_LIMIT_PER_MINUTE`: 敏感查询限流阈值（默认 `3`）
 
 > 备注：`ENABLE_IMAGE_OCR=false` 可全局关闭 OCR；若只想单轮禁用 OCR，可在提问中加入“不要ocr”。
+
+## 🧪 最小测试与评测
+
+- 单元测试：
+  ```bash
+  python -m unittest tests/test_policies.py tests/test_security.py
+  ```
+- 检索触发策略评测：
+  ```bash
+  python eval/run_eval.py
+  ```
+
+- 生成评测报告 + 回归对比：
+  ```bash
+  python eval/run_eval.py --report eval/reports/current.json
+  python eval/compare_reports.py --baseline eval/reports/baseline.json --current eval/reports/current.json --out eval/reports/compare.md
+  ```
+
+- 查看本地指标看板（延迟/命中率/错误率）：
+  ```bash
+  python scripts/show_metrics_dashboard.py
+  ```
+
+- 查看 E2E 回归矩阵：
+  - `eval/e2e_regression_matrix.md`
 
 ## 📂 项目结构
 
@@ -194,8 +252,21 @@ AgentLearn/
 ├── data/                 # 存放你的个人笔记 (Markdown/Txt/Images)
 ├── faiss_index/          # 自动生成的向量索引数据库
 ├── .env                  # 环境变量 (API Key)
-├── main.py               # 🚀 主程序入口（OpenAI-Compatible 调用 + LangGraph）
-├── rag_engine.py         # 🧠 RAG 引擎（向量化、检索、增量更新、降级容错）
+├── config/settings.py    # ⚙️ 配置中心（含启动校验）
+├── core/domain/policies.py
+├── core/domain/retrieval_planner.py   # 🧭 检索规划（rewrite/filter/rerank）
+├── core/security/         # 🔐 鉴权、限流、注入防护、审计、工具白名单
+├── core/observability/   # 📊 日志与基础指标
+├── infra/llm/            # 🔌 OpenAI-compatible 客户端封装
+├── infra/retrieval/      # 🔎 检索流水线、模型 reranker、存储恢复工具
+├── workflow/             # 🕸️ LangGraph state/graph/nodes 编排层
+├── main.py               # 🚀 主程序入口
+├── rag_engine.py         # 🧠 RAG 引擎（向量化、检索、增量更新、快照回滚与恢复）
+├── scripts/quality_gate.py           # ✅ 一键质量门禁
+├── scripts/show_metrics_dashboard.py # 📈 本地指标看板
+├── eval/run_eval.py                  # 🧪 评测执行
+├── eval/compare_reports.py           # 📊 评测回归对比
+├── eval/e2e_regression_matrix.md     # 🧾 E2E 回归矩阵
 ├── requirements.txt      # 依赖列表
 └── README.md             # 说明文档
 ```
@@ -210,13 +281,3 @@ AgentLearn/
 - [ ] **多格式支持**: 支持 PDF, Word, Excel 文档
 - [ ] **Web 界面**: 开发 Streamlit/Gradio 网页版 UI
 - [ ] **长期记忆**: 引入 SQLite 存储历史对话摘要
-
-## 📝 近期改造记录
-1. **中转站接口兼容**：从 SDK 调用改为原生 HTTP OpenAI 兼容调用。
-2. **接口策略明确化**：默认 `responses`，失败可切 `chat`。
-3. **RAG 容错增强**：embedding 初始化失败时降级，不阻塞启动。
-4. **多模态增强**：加入 CLIP 图片向量索引 + RapidOCR 文本抽取，图片内容可作为笔记资源参与检索。
-5. **视觉理解增强**：支持调用多模态大模型直接理解图片并生成语义摘要，补足纯 OCR 对场景/结构信息的缺失。
-
----
-*Created by Vinícius & Trae AI Pair Programmer*

@@ -1,2 +1,18 @@
 data/
 faiss_index/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local secrets / config
+.env
+
+# Local runtime artifacts
+*.sqlite
+memory.sqlite
+
+# Temp files
+.git_status.txt
+.DS_Store

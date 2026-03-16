@@ -1,17 +1,26 @@
 import os
 import hashlib
 import json
+import base64
+import mimetypes
+from pathlib import Path
 
 # 必须在导入 transformers/huggingface 之前设置镜像源
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
-from typing import List, Dict
+from typing import List, Dict, Any
 from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
+import numpy as np
+import faiss
+from PIL import Image
+from sentence_transformers import SentenceTransformer
+from rapidocr_onnxruntime import RapidOCR
+import requests
 
 
 class RAGEngine:
@@ -23,20 +32,174 @@ class RAGEngine:
     4. 自动更新 (Auto-Update): 基于文件哈希检测变化
     """
 
+    TEXT_EXTS = {".md", ".txt"}
+    IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
     def __init__(self, data_dir: str = "data", db_path: str = "faiss_index"):
         self.data_dir = data_dir
         self.db_path = db_path
         self.hash_file = os.path.join(db_path, "file_hashes.json")  # 哈希记录文件
-        
-        # 更换为中文专用 Embedding 模型，解决中文语义匹配不准的问题
-        # shibing624/text2vec-base-chinese 是目前效果最好的开源中文模型之一
-        print(
-            "📥 [RAG] 正在初始化 Embedding 模型 (shibing624/text2vec-base-chinese)..."
+        self.image_index_file = os.path.join(db_path, "image_clip.faiss")
+        self.image_meta_file = os.path.join(db_path, "image_clip_meta.json")
+        self.image_text_note_file = os.path.join(db_path, "image_text_notes.json")
+        self.embedding_model = os.getenv(
+            "EMBEDDING_MODEL", "shibing624/text2vec-base-chinese"
         )
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="shibing624/text2vec-base-chinese"
-        )
+        self.clip_model_name = os.getenv("IMAGE_EMBEDDING_MODEL", "clip-ViT-B-32")
+        self.vision_model_name = os.getenv("VISION_MODEL", os.getenv("MODEL", "gpt-4o-mini"))
+        self.enable_image_ocr = os.getenv("ENABLE_IMAGE_OCR", "true").lower() == "true"
+        self.enable_image_vlm = os.getenv("ENABLE_IMAGE_VLM", "true").lower() == "true"
+        self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", "60"))
+        self.embeddings = None
+        self.clip_model = None
+        self.ocr_engine = None
         self.vector_store = None
+        self.image_index = None
+        self.image_metadata: List[Dict[str, Any]] = []
+        self.image_text_notes: Dict[str, Dict[str, str]] = {}
+        self.rag_ready = False
+        self.image_ready = False
+        
+        # 启动时尝试初始化向量模型；失败时降级，不阻塞主程序
+        self._init_embeddings()
+        self._init_image_embeddings()
+        self._init_ocr_engine()
+
+    def _init_embeddings(self) -> bool:
+        """初始化 Embedding 模型。失败时返回 False，不抛出异常。"""
+        if self.embeddings is not None:
+            self.rag_ready = True
+            return True
+
+        print(f"📥 [RAG] 正在初始化 Embedding 模型 ({self.embedding_model})...")
+        try:
+            self.embeddings = HuggingFaceEmbeddings(model_name=self.embedding_model)
+            self.rag_ready = True
+            return True
+        except Exception as e:
+            self.rag_ready = False
+            self.embeddings = None
+            print("⚠️ [RAG] Embedding 模型初始化失败，已自动降级为无 RAG 模式。")
+            print(f"   失败原因: {type(e).__name__}: {e}")
+            print("   可能原因: 无法连接 HuggingFace / 镜像源超时 / 网络受限。")
+            print("   你仍可继续对话，但 search_notes 将暂时不可用。")
+            return False
+
+    def _init_image_embeddings(self) -> bool:
+        """初始化 CLIP 图文向量模型。失败时返回 False，不抛异常。"""
+        if self.clip_model is not None:
+            self.image_ready = True
+            return True
+
+        print(f"🖼️ [RAG] 正在初始化多模态模型 ({self.clip_model_name})...")
+        try:
+            self.clip_model = SentenceTransformer(self.clip_model_name)
+            self.image_ready = True
+            return True
+        except Exception as e:
+            self.image_ready = False
+            self.clip_model = None
+            print("⚠️ [RAG] 多模态模型初始化失败，图片检索功能已降级关闭。")
+            print(f"   失败原因: {type(e).__name__}: {e}")
+            return False
+
+    def _init_ocr_engine(self) -> bool:
+        """初始化 OCR 引擎，用于把图片内容转为可检索文本。"""
+        if not self.enable_image_ocr:
+            return False
+        if self.ocr_engine is not None:
+            return True
+        try:
+            self.ocr_engine = RapidOCR()
+            return True
+        except Exception as e:
+            print(f"⚠️ [RAG] OCR 引擎初始化失败，图片文本抽取已关闭: {type(e).__name__}: {e}")
+            self.ocr_engine = None
+            return False
+
+    def _extract_image_text(self, image_path: str) -> str:
+        """OCR 抽取单张图片文字。失败返回空字符串。"""
+        if not self._init_ocr_engine():
+            return ""
+        try:
+            result, _ = self.ocr_engine(image_path)
+            if not result:
+                return ""
+            lines = []
+            for item in result:
+                if not item or len(item) < 2:
+                    continue
+                text = item[1]
+                if text and isinstance(text, str):
+                    lines.append(text.strip())
+            return "\n".join([x for x in lines if x])
+        except Exception as e:
+            print(f"⚠️ [RAG] OCR 失败: {os.path.basename(image_path)} - {e}")
+            return ""
+
+    def _describe_image_with_vlm(self, image_path: str) -> str:
+        """调用多模态大模型理解图片内容，返回可检索文本。"""
+        if not self.enable_image_vlm:
+            return ""
+
+        base_url = (os.getenv("BASE_URL") or "").rstrip("/")
+        api_key = os.getenv("API_KEY")
+        if not base_url or not api_key:
+            return ""
+
+        try:
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+            mime = mimetypes.guess_type(image_path)[0] or "image/jpeg"
+            b64 = base64.b64encode(image_bytes).decode("utf-8")
+            data_url = f"data:{mime};base64,{b64}"
+
+            payload = {
+                "model": self.vision_model_name,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是图像理解助手。请输出中文结构化摘要，包含："
+                            "1) 图片类型；2) 关键可见元素；3) 可读文字（若有）；"
+                            "4) 可用于笔记检索的关键词。避免编造。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "请详细理解这张图片并生成可检索摘要。"},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    },
+                ],
+                "temperature": 0.2,
+            }
+
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+
+            resp = requests.post(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=self.request_timeout,
+            )
+            if resp.status_code >= 400:
+                print(f"⚠️ [RAG] 图片语义理解失败: HTTP {resp.status_code}")
+                return ""
+
+            data = resp.json()
+            choices = data.get("choices", []) or []
+            if not choices:
+                return ""
+            content = choices[0].get("message", {}).get("content", "")
+            return content.strip() if isinstance(content, str) else str(content)
+        except Exception as e:
+            print(f"⚠️ [RAG] 图片语义理解异常: {os.path.basename(image_path)} - {e}")
+            return ""
 
     def _calculate_file_hash(self, filepath: str) -> str:
         """计算单个文件的 MD5 哈希值"""
@@ -54,7 +217,8 @@ class RAGEngine:
             
         for root, dirs, files in os.walk(self.data_dir):
             for file in files:
-                if file.endswith(".md") or file.endswith(".txt"):
+                ext = Path(file).suffix.lower()
+                if ext in self.TEXT_EXTS or ext in self.IMAGE_EXTS:
                     file_path = os.path.join(root, file)
                     # 使用相对路径作为 Key，避免绝对路径变化导致的问题
                     rel_path = os.path.relpath(file_path, self.data_dir)
@@ -66,7 +230,7 @@ class RAGEngine:
 
     def check_for_updates(self) -> bool:
         """检查是否有文件变动（新增、修改、删除）"""
-        print("� [RAG] 正在检查文档变更...")
+        print("🔍 [RAG] 正在检查文档变更...")
         
         # 1. 获取当前磁盘状态
         current_hashes = self._get_current_hashes()
@@ -97,47 +261,102 @@ class RAGEngine:
         return True
 
     def build_index(self):
-        """重建索引：遍历目录 -> 读取 -> 切分 -> 向量化 -> 保存"""
-        print(f"📚 [RAG] 正在重建索引 (检测到变更)...")
+        """重建索引：文本向量索引 + 图片向量索引"""
+        text_ok = self._init_embeddings()
+        image_ok = self._init_image_embeddings()
+        if not text_ok and not image_ok:
+            print("⚠️ [RAG] 跳过索引构建：文本与图片向量模型均不可用。")
+            return
+
+        print("📚 [RAG] 正在构建/重建索引...")
 
         docs = []
+        image_files: List[str] = []
+        image_text_notes: Dict[str, Dict[str, str]] = {}
         # 手动遍历目录，确保编码控制 (Windows下 UTF-8 兼容性)
         if not os.path.exists(self.data_dir):
             os.makedirs(self.data_dir)
 
         for root, dirs, files in os.walk(self.data_dir):
             for file in files:
-                if file.endswith(".md") or file.endswith(".txt"):
-                    file_path = os.path.join(root, file)
+                file_path = os.path.join(root, file)
+                ext = Path(file).suffix.lower()
+
+                if ext in self.TEXT_EXTS and text_ok:
                     try:
                         # 尝试 UTF-8 加载
                         loader = TextLoader(file_path, encoding="utf-8")
                         docs.extend(loader.load())
-                        print(f"  ✅ 加载成功: {file}")
+                        print(f"  ✅ 文本加载成功: {file}")
                     except UnicodeDecodeError:
                         try:
                             # 失败则尝试 GBK (兼容 Windows 旧文件)
                             loader = TextLoader(file_path, encoding="gbk")
                             docs.extend(loader.load())
-                            print(f"  ✅ 加载成功 (GBK): {file}")
+                            print(f"  ✅ 文本加载成功 (GBK): {file}")
                         except Exception as e:
-                            print(f"  ❌ 加载失败 (编码问题): {file} - {e}")
+                            print(f"  ❌ 文本加载失败 (编码问题): {file} - {e}")
                     except Exception as e:
-                        print(f"  ❌ 加载失败: {file} - {e}")
+                        print(f"  ❌ 文本加载失败: {file} - {e}")
 
-        if not docs:
-            print("⚠️ 未找到文档，跳过索引构建。请在 data/ 目录下添加 .md 笔记。")
-            return
+                if ext in self.IMAGE_EXTS and image_ok:
+                    image_files.append(file_path)
+                    rel_path = os.path.relpath(file_path, self.data_dir)
+                    image_text_notes.setdefault(rel_path, {"vlm": "", "ocr": ""})
 
-        print(f"📄 加载了 {len(docs)} 个文档。正在切分...")
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-        splits = text_splitter.split_documents(docs)
+                    # 1) 多模态大模型语义理解入库（优先）
+                    if text_ok and self.enable_image_vlm:
+                        vlm_text = self._describe_image_with_vlm(file_path)
+                        if vlm_text:
+                            rel_path = os.path.relpath(file_path, self.data_dir)
+                            docs.append(
+                                Document(
+                                    page_content=f"[图片语义理解]\n{vlm_text}",
+                                    metadata={
+                                        "source": rel_path,
+                                        "type": "image_vlm",
+                                    },
+                                )
+                            )
+                            image_text_notes[rel_path]["vlm"] = vlm_text
+                            print(f"  ✅ 图片语义理解成功并入库: {rel_path}")
+                        else:
+                            print(f"  ⚠️ 图片语义理解无结果: {os.path.relpath(file_path, self.data_dir)}")
 
-        print(f"🔢 切分出 {len(splits)} 个片段。正在向量化...")
-        self.vector_store = FAISS.from_documents(splits, self.embeddings)
+                    # 2) OCR 作为补充文本入库（可关闭）
+                    if text_ok and self.enable_image_ocr:
+                        ocr_text = self._extract_image_text(file_path)
+                        if ocr_text:
+                            rel_path = os.path.relpath(file_path, self.data_dir)
+                            docs.append(
+                                Document(
+                                    page_content=f"[图片OCR内容]\n{ocr_text}",
+                                    metadata={
+                                        "source": rel_path,
+                                        "type": "image_ocr",
+                                    },
+                                )
+                            )
+                            image_text_notes[rel_path]["ocr"] = ocr_text
+                            print(f"  ✅ 图片OCR成功并入库: {rel_path}")
+                        else:
+                            print(f"  ⚠️ 图片OCR无文本: {os.path.relpath(file_path, self.data_dir)}")
 
-        # 本地持久化
-        self.vector_store.save_local(self.db_path)
+        # 构建文本索引
+        if docs and text_ok:
+            print(f"📄 加载了 {len(docs)} 个文档。正在切分...")
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+            splits = text_splitter.split_documents(docs)
+
+            print(f"🔢 切分出 {len(splits)} 个文本片段。正在向量化...")
+            self.vector_store = FAISS.from_documents(splits, self.embeddings)
+            self.vector_store.save_local(self.db_path)
+        elif text_ok:
+            print("⚠️ 未找到可索引文本（.md/.txt），跳过文本索引。")
+
+        # 构建图片索引
+        self._build_image_index(image_files)
+        self._save_image_text_notes(image_text_notes)
         
         # 保存新的文件哈希记录
         current_hashes = self._get_current_hashes()
@@ -148,64 +367,304 @@ class RAGEngine:
         except Exception as e:
             print(f"⚠️ 索引已保存，但哈希记录写入失败: {e}")
 
+    def _build_image_index(self, image_files: List[str]):
+        """构建 CLIP 图片向量索引。"""
+        if not self._init_image_embeddings():
+            print("⚠️ [RAG] 跳过图片索引构建：多模态模型不可用。")
+            return
+
+        if not image_files:
+            print("⚠️ 未找到可索引图片（png/jpg/jpeg/webp/bmp），跳过图片索引。")
+            self.image_index = None
+            self.image_metadata = []
+            return
+
+        vectors = []
+        metadata = []
+        print(f"🖼️ 正在向量化 {len(image_files)} 张图片...")
+        for path in image_files:
+            rel_path = os.path.relpath(path, self.data_dir)
+            try:
+                img = Image.open(path).convert("RGB")
+                vec = self.clip_model.encode(img, normalize_embeddings=True)
+                vec = np.array(vec, dtype="float32")
+                vectors.append(vec)
+                metadata.append({"source": rel_path})
+                print(f"  ✅ 图片向量化成功: {rel_path}")
+            except Exception as e:
+                print(f"  ❌ 图片向量化失败: {rel_path} - {e}")
+
+        if not vectors:
+            print("⚠️ 图片向量化全部失败，未生成图片索引。")
+            self.image_index = None
+            self.image_metadata = []
+            return
+
+        matrix = np.vstack(vectors).astype("float32")
+        dim = matrix.shape[1]
+        index = faiss.IndexFlatIP(dim)
+        index.add(matrix)
+
+        os.makedirs(self.db_path, exist_ok=True)
+        faiss.write_index(index, self.image_index_file)
+        with open(self.image_meta_file, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        self.image_index = index
+        self.image_metadata = metadata
+        print(f"✅ 图片索引构建完成：{len(metadata)} 张")
+
+    def _save_image_text_notes(self, notes: Dict[str, Dict[str, str]]):
+        """保存图片文本资源（VLM/OCR）到本地，便于检索兜底。"""
+        self.image_text_notes = notes or {}
+        try:
+            os.makedirs(self.db_path, exist_ok=True)
+            with open(self.image_text_note_file, "w", encoding="utf-8") as f:
+                json.dump(self.image_text_notes, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"⚠️ 图片文本资源保存失败: {e}")
+
+    def _load_image_text_notes(self):
+        """加载图片文本资源（VLM/OCR）。"""
+        if not os.path.exists(self.image_text_note_file):
+            self.image_text_notes = {}
+            return
+        try:
+            with open(self.image_text_note_file, "r", encoding="utf-8") as f:
+                self.image_text_notes = json.load(f)
+        except Exception as e:
+            print(f"⚠️ 图片文本资源加载失败: {e}")
+            self.image_text_notes = {}
+
+    def _load_image_index(self) -> bool:
+        """加载图片向量索引与元数据。"""
+        if not self._init_image_embeddings():
+            return False
+
+        if not (os.path.exists(self.image_index_file) and os.path.exists(self.image_meta_file)):
+            return False
+
+        try:
+            self.image_index = faiss.read_index(self.image_index_file)
+            with open(self.image_meta_file, "r", encoding="utf-8") as f:
+                self.image_metadata = json.load(f)
+            self._load_image_text_notes()
+            return True
+        except Exception as e:
+            print(f"⚠️ 图片索引加载失败: {e}")
+            self.image_index = None
+            self.image_metadata = []
+            return False
+
     def load_index(self) -> bool:
         """加载已保存的索引，并自动检查增量更新"""
+        text_ok = self._init_embeddings()
+        image_ok = self._init_image_embeddings()
+        if not text_ok and not image_ok:
+            return False
+
         # 1. 检查是否需要更新 (增量检测)
         if self.check_for_updates():
             self.build_index()
-            # 重建后重新加载
-            try:
-                self.vector_store = FAISS.load_local(
-                    self.db_path, self.embeddings, allow_dangerous_deserialization=True
-                )
-                return True
-            except Exception as e:
-                print(f"⚠️ 重建后加载失败: {e}")
-                return False
+            text_loaded = False
+            image_loaded = False
+            if text_ok and os.path.exists(self.db_path):
+                try:
+                    self.vector_store = FAISS.load_local(
+                        self.db_path, self.embeddings, allow_dangerous_deserialization=True
+                    )
+                    text_loaded = True
+                except Exception as e:
+                    print(f"⚠️ 重建后文本索引加载失败: {e}")
+            if image_ok:
+                image_loaded = self._load_image_index()
+            return text_loaded or image_loaded
 
         # 2. 正常加载
-        if os.path.exists(self.db_path):
+        text_loaded = False
+        image_loaded = False
+
+        if text_ok and os.path.exists(self.db_path):
             try:
                 self.vector_store = FAISS.load_local(
                     self.db_path, self.embeddings, allow_dangerous_deserialization=True
                 )
-                return True
+                text_loaded = True
             except Exception as e:
                 print(f"⚠️ 索引加载失败: {e}")
                 # 加载失败可能是索引损坏，尝试重建
                 self.build_index()
-                return True
-        else:
-            # 索引不存在，构建
+                if text_ok:
+                    try:
+                        self.vector_store = FAISS.load_local(
+                            self.db_path, self.embeddings, allow_dangerous_deserialization=True
+                        )
+                        text_loaded = True
+                    except Exception:
+                        text_loaded = False
+        elif text_ok:
             self.build_index()
-            return True
+            try:
+                self.vector_store = FAISS.load_local(
+                    self.db_path, self.embeddings, allow_dangerous_deserialization=True
+                )
+                text_loaded = True
+            except Exception:
+                text_loaded = False
 
-    def search(self, query: str, k: int = 8) -> str:
-        """检索接口"""
+        if image_ok:
+            image_loaded = self._load_image_index()
+            if not image_loaded:
+                self.build_index()
+                image_loaded = self._load_image_index()
+
+        return text_loaded or image_loaded
+
+    def _search_text(self, query: str, k: int = 6) -> List[str]:
+        """文本检索。"""
+        if not self._init_embeddings():
+            return []
+        if not self.vector_store and not self.load_index():
+            return []
         if not self.vector_store:
-            if not self.load_index():
-                return ""
+            return []
 
         try:
-            # 增加检索数量 k=8，提高召回率，防止关键信息漏掉
             results = self.vector_store.similarity_search(query, k=k)
-
-            # 拼接内容，并添加来源信息
-            context_list = [
-                f"[来源: {os.path.basename(doc.metadata.get('source', '未知'))}]\n{doc.page_content}"
+            return [
+                f"[文本来源: {os.path.basename(doc.metadata.get('source', '未知'))}]\n{doc.page_content}"
                 for doc in results
             ]
-            full_context = "\n---\n".join(context_list)
-
-            # 安全阀：限制返回的最大字符数，防止 Token 溢出导致 LLM 报错或变慢
-            # 4000 字符大约对应 2000-3000 tokens，对大多数 LLM 都是安全的
-            if len(full_context) > 4000:
-                print(
-                    f"⚠️ 检索内容过长 ({len(full_context)} 字符)，已截断至 4000 字符。"
-                )
-                return full_context[:4000] + "\n...(内容已截断)"
-
-            return full_context
         except Exception as e:
-            print(f"检索出错: {e}")
+            print(f"文本检索出错: {e}")
+            return []
+
+    def _search_images(self, query: str, k: int = 4, vlm_only: bool = False) -> List[str]:
+        """图片语义检索：文本 query -> CLIP 向量 -> 图片近邻。"""
+        if not self._init_image_embeddings():
+            return []
+        if self.image_index is None and not self.load_index():
+            return []
+        if self.image_index is None:
+            return []
+
+        try:
+            q = self.clip_model.encode(query, normalize_embeddings=True)
+            q = np.array([q], dtype="float32")
+            top_k = min(k, self.image_index.ntotal)
+            if top_k <= 0:
+                return []
+
+            scores, indices = self.image_index.search(q, top_k)
+            hits = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < 0 or idx >= len(self.image_metadata):
+                    continue
+                src = self.image_metadata[idx].get("source", "未知")
+                ocr_hint = ""
+                if self.enable_image_ocr and not vlm_only:
+                    ocr_hint = "（若启用OCR，可继续追问图片中的文字内容）"
+                hits.append(f"[图片来源: {src}]\n语义相似度: {float(score):.4f} {ocr_hint}")
+            return hits
+        except Exception as e:
+            print(f"图片检索出错: {e}")
+            return []
+
+    def _search_image_text_notes(self, query: str, k: int = 2, vlm_only: bool = False) -> List[str]:
+        """基于图片文件名与文本内容做轻量关键词匹配，兜底返回图片文本资源。"""
+        if not self.image_text_notes:
+            self._load_image_text_notes()
+        if not self.image_text_notes:
+            return []
+
+        q = (query or "").lower().strip()
+        if not q:
+            return []
+
+        scored = []
+        for src, payload in self.image_text_notes.items():
+            vlm = (payload.get("vlm") or "").strip()
+            ocr = (payload.get("ocr") or "").strip()
+            if vlm_only and not vlm:
+                continue
+            merged = f"{vlm}\n{ocr}".strip()
+            if not merged:
+                continue
+
+            score = 0
+            src_l = src.lower()
+            if q in src_l:
+                score += 3
+            for token in q.replace("，", " ").replace("。", " ").split():
+                if token and token in src_l:
+                    score += 1
+                if token and token in merged.lower():
+                    score += 1
+            # 针对“身份证/idcard/图片内容”等意图给图片文本更高优先级
+            if any(x in q for x in ["idcard", "身份证", "图片", "图里", "图像"]):
+                score += 2
+
+            if score > 0:
+                scored.append((score, src, vlm, ocr))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        hits = []
+        for _, src, vlm, ocr in scored[:k]:
+            parts = [f"[图片文本来源: {src}]"]
+            if vlm:
+                parts.append(f"[图片语义理解]\n{vlm}")
+            if ocr and not vlm_only:
+                parts.append(f"[图片OCR内容]\n{ocr}")
+            hits.append("\n".join(parts))
+        return hits
+
+    def search(self, query: str, k: int = 8, vlm_only: bool = False) -> str:
+        """多模态检索接口（文本 + 图片双索引融合）。"""
+        text_hits = self._search_text(query, k=max(2, k - 2))
+        image_note_hits = self._search_image_text_notes(query, k=2, vlm_only=vlm_only)
+        image_hits = self._search_images(query, k=min(4, k), vlm_only=vlm_only)
+
+        q = (query or "").lower()
+        image_intent = any(x in q for x in ["idcard", "身份证", "图片", "图里", "图像", "照片"])
+
+        context_sections = []
+        # 若问题明显是“图片内容意图”，优先给图片文本资源，避免被大段普通文本淹没
+        if image_intent:
+            if image_note_hits:
+                context_sections.append("\n---\n".join(image_note_hits))
+            if image_hits:
+                context_sections.append("\n---\n".join(image_hits))
+            if text_hits and not vlm_only:
+                context_sections.append("\n---\n".join(text_hits[:2]))
+        else:
+            if text_hits and not vlm_only:
+                context_sections.append("\n---\n".join(text_hits))
+            if image_note_hits:
+                context_sections.append("\n---\n".join(image_note_hits))
+            if image_hits:
+                context_sections.append("\n---\n".join(image_hits))
+
+        if vlm_only and not image_note_hits:
+            context_sections.insert(
+                0,
+                "[系统提示]\n用户要求‘不要OCR，仅用图片语义理解’。当前未检索到可用的图片语义理解文本（VLM）。",
+            )
+
+        full_context = "\n\n==========\n\n".join(context_sections).strip()
+        if not full_context:
             return ""
+
+        # 安全阀：限制返回字符，防止 Token 溢出
+        if len(full_context) > 4500:
+            print(f"⚠️ 检索内容过长 ({len(full_context)} 字符)，已截断至 4500 字符。")
+            return full_context[:4500] + "\n...(内容已截断)"
+        return full_context
+
+    def list_note_files(self) -> List[str]:
+        """返回当前 data 目录可见的笔记/图片文件列表（相对路径）。"""
+        try:
+            hashes = self._get_current_hashes()
+            return sorted(hashes.keys())
+        except Exception as e:
+            print(f"列出笔记文件失败: {e}")
+            return []

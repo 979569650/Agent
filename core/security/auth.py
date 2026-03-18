@@ -6,14 +6,14 @@ except Exception:  # pragma: no cover
     bcrypt = None
 
 
-def hash_security_key_bcrypt(plain_key: str) -> str:
-    """使用 bcrypt 生成安全密钥哈希。"""
+def hash_access_code_bcrypt(plain_key: str) -> str:
+    """使用 bcrypt 生成访问口令哈希。"""
     if not bcrypt:
         raise RuntimeError("bcrypt 未安装，无法生成 bcrypt 哈希")
     return bcrypt.hashpw(plain_key.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-def verify_security_key(user_input: str, expected_hash: str) -> bool:
+def verify_access_code(user_input: str, expected_hash: str) -> bool:
     """
     兼容两类哈希：
     1) bcrypt（推荐）: 以 $2a/$2b/$2y 开头
@@ -32,3 +32,4 @@ def verify_security_key(user_input: str, expected_hash: str) -> bool:
 
     user_hash = hashlib.sha256(user_input.encode("utf-8")).hexdigest()
     return user_hash == expected_hash
+

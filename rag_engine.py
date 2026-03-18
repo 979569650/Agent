@@ -135,7 +135,31 @@ class RAGEngine:
 
         print(f"🖼️ [RAG] 正在初始化多模态模型 ({self.clip_model_name})...")
         try:
-            self.clip_model = SentenceTransformer(self.clip_model_name)
+            from sentence_transformers import SentenceTransformer
+            from transformers import CLIPProcessor
+
+            original_from_pretrained = CLIPProcessor.from_pretrained
+
+            def _load_with_mode(use_fast: bool):
+                def _patched_from_pretrained(*args, **kwargs):
+                    if ("use_fast" not in kwargs) or (kwargs.get("use_fast") is None):
+                        kwargs["use_fast"] = use_fast
+                    return original_from_pretrained(*args, **kwargs)
+
+                CLIPProcessor.from_pretrained = _patched_from_pretrained
+                try:
+                    return SentenceTransformer(self.clip_model_name)
+                finally:
+                    CLIPProcessor.from_pretrained = original_from_pretrained
+
+            try:
+                self.clip_model = _load_with_mode(use_fast=True)
+            except ImportError as e:
+                if "Torchvision" not in str(e):
+                    raise
+                print("⚠️ [RAG] 未检测到 torchvision，已回退慢速图片处理器。")
+                self.clip_model = _load_with_mode(use_fast=False)
+
             self.image_ready = True
             return True
         except Exception as e:

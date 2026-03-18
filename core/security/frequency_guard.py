@@ -2,8 +2,8 @@ import time
 from collections import deque
 
 
-class SlidingWindowRateLimiter:
-    """简单滑动窗口限流器（进程内）。"""
+class SlidingWindowFrequencyGuard:
+    """简单滑动窗口频控器（进程内）。"""
 
     def __init__(self, limit: int, window_seconds: int = 60):
         self.limit = max(1, int(limit))
@@ -22,3 +22,5 @@ class SlidingWindowRateLimiter:
 
         self._events.append(now)
         return True
+
+

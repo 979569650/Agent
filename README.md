@@ -1,7 +1,7 @@
 # 🤖 AgentLearn: 个人智能笔记助理（OpenAI Responses + 多模态 RAG）
 
 > 一个面向本地笔记管理的智能助理项目。  
-> 当前版本聚焦：**OpenAI Responses 接口优先调用** + **本地多模态 RAG（文本+图片）可降级运行**。
+> 项目聚焦：**OpenAI Responses 接口优先调用** + **本地多模态 RAG（文本+图片）可降级运行**。
 
 ## 📖 项目简介
 
@@ -9,21 +9,22 @@
 
 - 使用 **OpenAI Responses API** 进行对话（支持中转站）
 - 使用 **RAG** 管理并检索本地 Markdown / TXT / 图片 笔记
+- 提供 **CLI + Web** 两种使用方式（`main.py` 与 `app_web.py`）
 - 在 Embedding 模型网络不可用时，自动降级，避免程序启动失败
 
 ## 🏗️ 技术架构
 
-当前技术栈：
+技术栈：
 
 * **模型调用**: OpenAI Responses API（默认）+ Chat Completions（可切换）
 * **编排**: [LangGraph](https://langchain-ai.github.io/langgraph/)
 * **框架**: [LangChain](https://www.langchain.com/)
 * **RAG**: [FAISS](https://github.com/facebookresearch/faiss) + HuggingFace Embeddings（文本）+ CLIP（图片）
 * **文件增量检测**: 基于 MD5 哈希
-* **可观测**: 结构化日志 + OpenTelemetry（可选）+ 本地指标看板脚本
-* **安全**: 敏感查询校验、限流、防注入、工具白名单、审计事件
+* **可观测**: 结构化日志 + OpenTelemetry（可选）+ 本地指标看板脚本 + Web 系统状态/后台诊断页
+* **防护**: 受限查询校验、频控、防注入、工具白名单、审计事件
 
-### 当前调用流程
+### 调用流程
 
 ```mermaid
 graph LR
@@ -62,12 +63,12 @@ graph LR
    - 可选 OpenTelemetry span（`OTEL_ENABLED=true`）
    - 支持日志落盘为 JSONL，并通过脚本查看延迟/命中率/错误率
 
-5. **🔐 敏感查询安全键校验（可选）**
-   - 账号/密码类查询可要求输入安全密钥（支持 bcrypt，兼容 SHA256）
-   - 内置敏感查询限流（默认每分钟 3 次）
+5. **🔐 受限查询防护键校验（可选）**
+   - 账号/密码类查询可要求输入访问口令（支持 bcrypt，兼容 SHA256）
+   - 内置受限查询频控（默认每分钟 3 次）
    - 输入防注入规则（提示词劫持/越权探测）
    - 工具白名单策略（限制可执行工具）
-   - 安全审计事件日志（便于事后排查）
+   - 防护审计事件日志（便于事后排查）
 
 ## 🚀 快速开始
 
@@ -87,7 +88,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 3. 配置密钥
+### 3. 配置口令
 复制 `.env.example` 为 `.env`，按你的中转站配置填写：
 ```ini
 API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
@@ -98,7 +99,7 @@ REQUEST_TIMEOUT=45
 SECURITY_KEY_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-> 注意：仓库中的 `.env` 属于本地敏感信息文件，请勿提交到 git。当前项目已在 `.gitignore` 中忽略它。
+> 注意：仓库中的 `.env` 属于本地受限信息文件，请勿提交到 git。当前项目已在 `.gitignore` 中忽略它。
 
 ### 4. 准备数据
 在 `data/` 目录下放入你的 Markdown (`.md`) / Text (`.txt`) / 图片 (`.png/.jpg/.jpeg/.webp/.bmp`) 文件。
@@ -109,6 +110,23 @@ SECURITY_KEY_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```bash
 python main.py
 ```
+
+### 6. 运行 Web UI
+
+```bash
+python -m uvicorn app_web:app --host 127.0.0.1 --port 8000 --reload
+```
+
+启动后访问：`http://127.0.0.1:8000`
+
+可用页面与接口：
+
+- `/api/chat`
+- `/api/notes*`（列表/读取/新增/修改/删除/重命名/上传）
+- `/api/index/*`（重建与状态）
+- `/api/config*`（读取/更新/测试/重置）
+- `/api/system/status`
+- `/api/health`
 
 ## ✅ 使用指南（建议按这个流程）
 
@@ -129,7 +147,7 @@ python main.py
    BASE_URL=https://你的中转站域名/v1
    MODEL=gpt-5.3-codex
    API_MODE=responses
-   # SECURITY_KEY_HASH=（可选，见下方“安全密钥”）
+   # SECURITY_KEY_HASH=（可选，见下方“访问口令”）
    ```
 
 3. **准备笔记数据**
@@ -150,7 +168,7 @@ python main.py
 - “我记录过 XXX 项目的 TODO 吗？”
 - “把我关于 XX 的笔记要点汇总一下”
 
-当前版本默认按“对话优先”工作流返回答案；RAG 检索能力已在项目中实现并可扩展到工具调用链。
+默认按“对话优先”工作流返回答案；RAG 检索能力可按需接入工具调用链。
 
 #### 图片问答建议写法
 
@@ -187,9 +205,9 @@ python main.py
 - 第一次运行慢：通常是 embedding 下载 + 索引构建导致，属于正常现象。
 - 若多实例同时触发 `update`：当前版本已加入基础文件锁与 JSON 原子写，避免索引脏写。
 
-## 🔐 安全密钥（可选）
+## 🔐 访问口令（可选）
 
-当你询问“账号/密码/密钥”等敏感信息时，程序会要求输入安全密钥；它会将你输入的密钥做 **SHA256** 后与 `SECURITY_KEY_HASH` 比对。
+当你询问“账号/密码/口令”等受限信息时，程序会要求输入访问口令；它会将你输入的口令做 **SHA256** 后与 `SECURITY_KEY_HASH` 比对。
 
 你可以用下面命令生成哈希：
 
@@ -215,8 +233,8 @@ python -c "import hashlib;print(hashlib.sha256('your-key'.encode()).hexdigest())
 - `VISION_MODEL`: 图片理解用多模态模型（默认跟随 `MODEL`）
 - `ENABLE_IMAGE_VLM`: 是否启用“视觉大模型理解入库”（默认 `true`）
 - `ENABLE_IMAGE_OCR`: 是否启用图片 OCR 入库（默认 `true`）
-- `SECURITY_KEY_HASH`: 敏感查询安全键哈希（可选）
-- `SENSITIVE_QUERY_LIMIT_PER_MINUTE`: 敏感查询限流阈值（默认 `3`）
+- `SECURITY_KEY_HASH`: 受限查询防护键哈希（可选）
+- `RESTRICTED_QUERY_LIMIT_PER_MINUTE`: 受限查询频控阈值（默认 `3`）
 
 > 备注：`ENABLE_IMAGE_OCR=false` 可全局关闭 OCR；若只想单轮禁用 OCR，可在提问中加入“不要ocr”。
 
@@ -255,7 +273,7 @@ AgentLearn/
 ├── config/settings.py    # ⚙️ 配置中心（含启动校验）
 ├── core/domain/policies.py
 ├── core/domain/retrieval_planner.py   # 🧭 检索规划（rewrite/filter/rerank）
-├── core/security/         # 🔐 鉴权、限流、注入防护、审计、工具白名单
+├── core/security/         # 🔐 鉴权、频控、注入防护、审计、工具白名单
 ├── core/observability/   # 📊 日志与基础指标
 ├── infra/llm/            # 🔌 OpenAI-compatible 客户端封装
 ├── infra/retrieval/      # 🔎 检索流水线、模型 reranker、存储恢复工具

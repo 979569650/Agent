@@ -11,8 +11,8 @@ class Settings:
     request_retry_backoff_ms: int = 500
     base_url: str = ""
     api_key: str = ""
-    security_key_hash: str = ""
-    sensitive_query_limit_per_minute: int = 3
+    access_code_hash: str = ""
+    restricted_query_limit_per_minute: int = 3
     allowed_tools: tuple[str, ...] = ("search_notes", "list_note_files")
     log_file: str = "observability/events.jsonl"
     reranker_enabled: bool = False
@@ -32,7 +32,7 @@ class Settings:
 
         retries_raw = os.getenv("REQUEST_MAX_RETRIES", "2")
         backoff_raw = os.getenv("REQUEST_RETRY_BACKOFF_MS", "500")
-        sensitive_limit_raw = os.getenv("SENSITIVE_QUERY_LIMIT_PER_MINUTE", "3")
+        restricted_limit_raw = os.getenv("RESTRICTED_QUERY_LIMIT_PER_MINUTE", "3")
         try:
             retries = max(0, int(retries_raw))
         except Exception:
@@ -42,9 +42,9 @@ class Settings:
         except Exception:
             backoff_ms = 500
         try:
-            sensitive_limit = max(1, int(sensitive_limit_raw))
+            restricted_limit = max(1, int(restricted_limit_raw))
         except Exception:
-            sensitive_limit = 3
+            restricted_limit = 3
 
         tools_raw = (os.getenv("ALLOWED_TOOLS") or "search_notes,list_note_files").strip()
         if tools_raw:
@@ -64,8 +64,8 @@ class Settings:
             request_retry_backoff_ms=backoff_ms,
             base_url=(os.getenv("BASE_URL") or "").rstrip("/"),
             api_key=os.getenv("API_KEY") or "",
-            security_key_hash=os.getenv("SECURITY_KEY_HASH") or "",
-            sensitive_query_limit_per_minute=sensitive_limit,
+            access_code_hash=os.getenv("SECURITY_KEY_HASH") or "",
+            restricted_query_limit_per_minute=restricted_limit,
             allowed_tools=allowed_tools,
             log_file=log_file,
             reranker_enabled=reranker_enabled,
@@ -80,3 +80,4 @@ class Settings:
             missing.append("API_KEY")
         if missing:
             raise RuntimeError(f"缺少必要环境变量: {', '.join(missing)}")
+

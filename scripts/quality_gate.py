@@ -27,7 +27,7 @@ CHECKS = [
         "core/security/tool_guard.py",
         "core/security/audit.py",
         "core/security/auth.py",
-        "core/security/rate_limit.py",
+        "core/security/frequency_guard.py",
         "scripts/show_metrics_dashboard.py",
         "eval/compare_reports.py",
     ],
@@ -52,3 +52,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

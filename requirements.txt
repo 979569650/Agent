@@ -15,3 +15,6 @@ transformers<5.0.0
 bcrypt
 opentelemetry-api
 opentelemetry-sdk
+fastapi
+uvicorn
+python-multipart

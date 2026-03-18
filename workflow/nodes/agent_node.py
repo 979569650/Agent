@@ -1,12 +1,13 @@
 import time
 import uuid
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from config.settings import Settings
 from core.domain.policies import (
-    contains_sensitive_keywords,
+    contains_restricted_keywords,
     should_force_vlm_only,
     should_list_notes_directly,
     should_use_retrieval,
@@ -15,9 +16,9 @@ from core.observability.logger import log_event
 from core.observability.metrics import runtime_metrics
 from core.observability.telemetry import traced_span
 from core.security.audit import audit_security_event
-from core.security.auth import verify_security_key as verify_security_key_hash
+from core.security.auth import verify_access_code as verify_access_code_hash
 from core.security.input_guard import check_prompt_injection
-from core.security.rate_limit import SlidingWindowRateLimiter
+from core.security.frequency_guard import SlidingWindowFrequencyGuard
 from core.security.tool_guard import ensure_tool_allowed
 from workflow.state import AgentState
 
@@ -25,12 +26,22 @@ if TYPE_CHECKING:
     from rag_engine import RAGEngine
 
 
-def _verify_security_key(settings: Settings, user_input: str) -> bool:
-    expected_hash = settings.security_key_hash
+@dataclass
+class RestrictedQueryTicketRequired(Exception):
+    ticket_id: str
+    message: str = "检测到受限查询，请输入访问口令。"
+
+
+class RestrictedQueryAborted(Exception):
+    pass
+
+
+def _verify_access_code(settings: Settings, user_input: str) -> bool:
+    expected_hash = settings.access_code_hash
     if not expected_hash:
-        print("⚠️ 安全密钥哈希未配置")
+        print("[Warn] 访问口令哈希未配置")
         return False
-    return verify_security_key_hash(user_input, expected_hash)
+    return verify_access_code_hash(user_input, expected_hash)
 
 
 def _search_notes(
@@ -38,44 +49,62 @@ def _search_notes(
     query: str,
     vlm_only: bool,
     settings: Settings,
-    sensitive_query_limiter: SlidingWindowRateLimiter,
+    restricted_query_limiter: SlidingWindowFrequencyGuard,
+    access_code: str | None = None,
+    ticket_id: str | None = None,
+    abort_ticket: bool = False,
 ) -> tuple[str, str | None]:
-    print(f"\n🔍 [Tool] 正在检索本地笔记: {query}")
+    print(f"\n[Tool] 正在检索本地笔记: {query}")
 
-    is_password_query = contains_sensitive_keywords(query)
+    is_password_query = contains_restricted_keywords(query)
     if is_password_query:
-        if not sensitive_query_limiter.allow():
+        if abort_ticket:
             audit_security_event(
-                action="sensitive_query",
+                action="restricted_query",
+                result="aborted",
+                reason="user_aborted",
+                ticket_id=ticket_id or "",
+            )
+            raise RestrictedQueryAborted()
+
+        if not restricted_query_limiter.allow():
+            audit_security_event(
+                action="restricted_query",
                 result="blocked",
-                reason="rate_limited",
+                reason="frequency_guarded",
                 query_preview="***REDACTED***",
             )
             return "", (
-                "❌ 敏感查询过于频繁，请稍后再试。"
-                f"（限流阈值：每分钟 {settings.sensitive_query_limit_per_minute} 次）"
+                "❌ 受限查询过于频繁，请稍后再试。"
+                f"（频控阈值：每分钟 {settings.restricted_query_limit_per_minute} 次）"
             )
 
-        print("⚠️ 检测到密码相关查询，需要安全验证")
-        print("请输入安全密钥（输入'cancel'取消查询）：")
+        if access_code is None:
+            new_ticket_id = ticket_id or uuid.uuid4().hex[:12]
+            audit_security_event(
+                action="restricted_query",
+                result="ticket_required",
+                reason="awaiting_access_code",
+                ticket_id=new_ticket_id,
+            )
+            raise RestrictedQueryTicketRequired(ticket_id=new_ticket_id)
 
-        try:
-            user_key = input("安全密钥: ").strip()
-            if user_key.lower() == "cancel":
-                audit_security_event(action="sensitive_query", result="cancelled", reason="user_cancelled")
-                return "", "查询已取消。"
-            if not _verify_security_key(settings, user_key):
-                audit_security_event(action="sensitive_query", result="blocked", reason="auth_failed")
-                return "", "❌ 没有获取密码的权限。安全密钥验证失败。"
+        if not _verify_access_code(settings, access_code):
+            audit_security_event(
+                action="restricted_query",
+                result="blocked",
+                reason="auth_failed",
+                ticket_id=ticket_id or "",
+            )
+            return "", "❌ 没有获取密码的权限。访问口令核验失败。"
 
-            audit_security_event(action="sensitive_query", result="allowed", reason="auth_passed")
-            print("✅ 安全密钥验证通过")
-        except KeyboardInterrupt:
-            audit_security_event(action="sensitive_query", result="cancelled", reason="keyboard_interrupt")
-            return "", "查询被用户中断。"
-        except Exception as e:
-            audit_security_event(action="sensitive_query", result="error", reason=type(e).__name__)
-            return "", f"❌ 安全验证过程中发生错误: {str(e)}"
+        audit_security_event(
+            action="restricted_query",
+            result="allowed",
+            reason="auth_passed",
+            ticket_id=ticket_id or "",
+        )
+        print("[OK] 访问口令核验通过")
 
     ensure_tool_allowed(settings, "search_notes")
     context = rag.search(query, vlm_only=vlm_only)
@@ -88,12 +117,15 @@ def create_agent_node(
     settings: Settings,
     llm_client,
     rag: "RAGEngine",
-    sensitive_query_limiter: SlidingWindowRateLimiter,
+    restricted_query_limiter: SlidingWindowFrequencyGuard,
 ) -> Callable[[AgentState], dict]:
     def agent_node(state: AgentState):
         trace_id = uuid.uuid4().hex[:10]
         started = time.perf_counter()
         messages = list(state["messages"])
+        access_code = state.get("access_code")
+        ticket_id = state.get("ticket_id")
+        abort_ticket = bool(state.get("abort_ticket", False))
 
         last_user_query = ""
         for msg in reversed(messages):
@@ -110,7 +142,7 @@ def create_agent_node(
                 reason=inj.reason,
                 query_preview=last_user_query[:80],
             )
-            return {"messages": [AIMessage(content="⚠️ 你的输入触发了安全策略（疑似提示词注入）。请改写后重试。")]}
+            return {"messages": [AIMessage(content="⚠️ 你的输入触发了防护策略（疑似提示词注入）。请改写后重试。")]}
 
         with traced_span("agent.request", trace_id=trace_id, query_len=len(last_user_query or "")) as span:
             log_event(
@@ -120,7 +152,7 @@ def create_agent_node(
                 model=settings.model_name,
                 query_preview=(
                     "***REDACTED***"
-                    if contains_sensitive_keywords(last_user_query)
+                    if contains_restricted_keywords(last_user_query)
                     else (last_user_query[:120] if last_user_query else "")
                 ),
             )
@@ -147,16 +179,39 @@ def create_agent_node(
                     }
                 return {"messages": [AIMessage(content="当前 data/ 目录下未发现可用笔记文件（.md/.txt）。")]}
 
-            if last_user_query and should_use_retrieval(last_user_query):
-                local_context, blocked_message = _search_notes(
-                    rag,
-                    last_user_query,
-                    force_vlm_only,
-                    settings,
-                    sensitive_query_limiter,
-                )
+            if last_user_query and (
+            should_use_retrieval(last_user_query)
+            or contains_restricted_keywords(last_user_query)
+        ):
+                try:
+                    local_context, blocked_message = _search_notes(
+                        rag,
+                        last_user_query,
+                        force_vlm_only,
+                        settings,
+                        restricted_query_limiter,
+                        access_code=access_code,
+                        ticket_id=ticket_id,
+                        abort_ticket=abort_ticket,
+                    )
+                except RestrictedQueryAborted:
+                    return {
+                        "messages": [AIMessage(content="查询已中止。")],
+                        "security_status": "aborted",
+                    }
+                except RestrictedQueryTicketRequired as ticket:
+                    return {
+                        "messages": [AIMessage(content=ticket.message)],
+                        "ticket_id": ticket.ticket_id,
+                        "ticket_required": True,
+                        "security_status": "awaiting_access_code",
+                    }
                 if blocked_message:
-                    return {"messages": [AIMessage(content=blocked_message)]}
+                    payload = {"messages": [AIMessage(content=blocked_message)]}
+                    if access_code is not None and ticket_id:
+                        payload["ticket_id"] = ticket_id
+                        payload["security_status"] = "verification_failed"
+                    return payload
 
                 runtime_metrics.mark_retrieval(bool(local_context))
                 log_event(
@@ -218,3 +273,5 @@ def create_agent_node(
             return {"messages": [AIMessage(content=reply)]}
 
     return agent_node
+
+

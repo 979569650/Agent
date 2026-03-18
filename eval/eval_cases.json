@@ -19,7 +19,7 @@
   {"id": "image_intent_vlm", "query": "不要ocr，按图片语义理解总结", "expected_use_retrieval": true},
   {"id": "image_intent_ocr", "query": "ocr一下图里的文字", "expected_use_retrieval": true},
 
-  {"id": "doc_intent_material", "query": "本地资料里有提到安全基线吗", "expected_use_retrieval": true},
+  {"id": "doc_intent_material", "query": "本地资料里有提到防护基线吗", "expected_use_retrieval": true},
   {"id": "doc_intent_extract", "query": "提炼一下我文档里的核心观点", "expected_use_retrieval": true},
   {"id": "doc_intent_search", "query": "检索一下 data 目录中关于评测的数据", "expected_use_retrieval": true},
   {"id": "doc_intent_password", "query": "帮我找一下账号密码记录", "expected_use_retrieval": true},
@@ -40,3 +40,4 @@
   {"id": "smalltalk_ok", "query": "好的", "expected_use_retrieval": false},
   {"id": "smalltalk_evening", "query": "晚上好", "expected_use_retrieval": false}
 ]
+

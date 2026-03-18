@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from config.settings import Settings
 from core.observability.logger import log_event
 from core.observability.metrics import runtime_metrics
-from core.security.rate_limit import SlidingWindowRateLimiter
+from core.security.frequency_guard import SlidingWindowFrequencyGuard
 from infra.llm.openai_compatible import OpenAICompatibleClient
 from rag_engine import RAGEngine
 from workflow.graph import build_app
@@ -21,13 +21,13 @@ load_dotenv()
 
 settings = Settings.from_env()
 llm_client = OpenAICompatibleClient(settings)
-sensitive_query_limiter = SlidingWindowRateLimiter(
-    limit=settings.sensitive_query_limit_per_minute,
+restricted_query_limiter = SlidingWindowFrequencyGuard(
+    limit=settings.restricted_query_limit_per_minute,
     window_seconds=60,
 )
 
 rag = RAGEngine()
-agent_node = create_agent_node(settings, llm_client, rag, sensitive_query_limiter)
+agent_node = create_agent_node(settings, llm_client, rag, restricted_query_limiter)
 app = build_app(agent_node)
 
 # ==========================================
@@ -179,3 +179,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

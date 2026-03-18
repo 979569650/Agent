@@ -15,9 +15,9 @@ def should_list_notes_directly(query: str) -> bool:
     return bool(q) and any(keyword in q for keyword in LIST_NOTE_KEYWORDS)
 
 
-def contains_sensitive_keywords(query: str) -> bool:
+def contains_restricted_keywords(query: str) -> bool:
     q = (query or "").lower()
-    password_keywords: List[str] = ["密码", "password", "密钥", "key", "账号", "account", "登录", "login"]
+    password_keywords: List[str] = ["密码", "password", "口令", "key", "账号", "account", "登录", "login"]
     return any(keyword in q for keyword in password_keywords)
 
 
@@ -53,3 +53,4 @@ def should_use_retrieval(query: str) -> bool:
         return True
 
     return False
+

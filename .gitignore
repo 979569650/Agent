@@ -1,10 +1,12 @@
 data/
 faiss_index/
+.claude/
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
+.pytest_cache/
 
 # Local secrets / config
 .env
@@ -12,11 +14,16 @@ __pycache__/
 # Local runtime artifacts
 *.sqlite
 memory.sqlite
+tmp_uvicorn_out.log
+tmp_uvicorn_err.log
 
 # Temp files
 .git_status.txt
 .DS_Store
+Thumbs.db
+优化任务清单.md
 
 # Observability artifacts
 observability/
 eval/reports/
+

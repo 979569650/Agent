@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentLearn - Web UI (P3)</title>
+  <style>
+    :root { color-scheme: light dark; }
+    :root[data-theme="light"] {
+      --color-bg: #f8fafc;
+      --color-surface: #ffffff;
+      --color-surface-soft: #f1f5f9;
+      --color-text: #0f172a;
+      --color-text-subtle: #64748b;
+      --color-border: #e2e8f0;
+      --color-primary: #2563eb;
+      --color-primary-soft: rgba(37, 99, 235, 0.12);
+      --color-success: #16a34a;
+      --color-success-soft: rgba(22, 163, 74, 0.14);
+      --color-warning: #d97706;
+      --color-warning-soft: rgba(217, 119, 6, 0.16);
+      --color-error: #dc2626;
+      --color-error-soft: rgba(220, 38, 38, 0.14);
+      --shadow-sm: 0 2px 10px rgba(15, 23, 42, 0.05);
+      --shadow-md: 0 10px 28px rgba(15, 23, 42, 0.08);
+    }
+    :root[data-theme="dark"] {
+      --color-bg: #0b1220;
+      --color-surface: #111c2d;
+      --color-surface-soft: #162338;
+      --color-text: #e5e7eb;
+      --color-text-subtle: #94a3b8;
+      --color-border: #2a3a52;
+      --color-primary: #60a5fa;
+      --color-primary-soft: rgba(96, 165, 250, 0.16);
+      --color-success: #22c55e;
+      --color-success-soft: rgba(34, 197, 94, 0.18);
+      --color-warning: #f59e0b;
+      --color-warning-soft: rgba(245, 158, 11, 0.2);
+      --color-error: #ef4444;
+      --color-error-soft: rgba(239, 68, 68, 0.2);
+      --shadow-sm: 0 2px 12px rgba(2, 6, 23, 0.35);
+      --shadow-md: 0 14px 30px rgba(2, 6, 23, 0.4);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top right, var(--color-primary-soft), transparent 28%), var(--color-bg);
+      color: var(--color-text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+    }
+
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 18px; }
+    h1, h2, h3 { margin: 0; line-height: 1.3; }
+    .muted { color: var(--color-text-subtle); font-size: 13px; }
+    .hidden { display: none !important; }
+    .mt-8 { margin-top: 8px; }
+    .mt-10 { margin-top: 10px; }
+    .mt-8-top-only { margin: 8px 0 0; }
+
+    .app-header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      padding: 14px 16px;
+      border: 1px solid var(--color-border);
+      border-radius: 16px;
+      background: var(--color-surface);
+      box-shadow: var(--shadow-sm);
+      margin-bottom: 14px;
+    }
+    .app-header h1 { font-size: 24px; letter-spacing: 0.2px; }
+    .header-subtitle { margin-top: 6px; }
+    .header-controls { display: flex; align-items: center; gap: 8px; }
+
+    .guide {
+      border: 1px solid var(--color-primary);
+      background: var(--color-primary-soft);
+      color: var(--color-text);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+
+    .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+    .tabs button {
+      border: 1px solid var(--color-border);
+      background: var(--color-surface);
+      color: var(--color-text);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: .2s ease;
+    }
+    .tabs button:hover { border-color: var(--color-primary); color: var(--color-primary); }
+    .tabs button.active {
+      background: var(--color-primary);
+      color: #fff;
+      border-color: var(--color-primary);
+      box-shadow: 0 6px 16px var(--color-primary-soft);
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.95fr);
+      gap: 14px;
+      align-items: start;
+    }
+
+    .card {
+      border: 1px solid var(--color-border);
+      border-radius: 14px;
+      background: var(--color-surface);
+      box-shadow: var(--shadow-sm);
+      padding: 14px;
+    }
+
+    .chat-main { display: flex; flex-direction: column; gap: 12px; min-height: 720px; }
+    .hero-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .hero-head h2 { font-size: 20px; }
+    .state-pill {
+      align-self: center;
+      font-size: 12px;
+      border-radius: 999px;
+      border: 1px solid var(--color-border);
+      background: var(--color-surface-soft);
+      color: var(--color-text-subtle);
+      padding: 4px 10px;
+      white-space: nowrap;
+    }
+    .state-pill.is-idle { border-color: var(--color-border); color: var(--color-text-subtle); }
+    .state-pill.is-sending { border-color: var(--color-primary); background: var(--color-primary-soft); color: var(--color-primary); }
+    .state-pill.is-awaiting { border-color: var(--color-warning); background: var(--color-warning-soft); color: #92400e; }
+    .state-pill.is-error { border-color: var(--color-error); background: var(--color-error-soft); color: #b91c1c; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .chip {
+      border: 1px solid var(--color-border);
+      background: transparent;
+      color: inherit;
+      border-radius: 999px;
+      padding: 7px 12px;
+      cursor: pointer;
+      transition: .15s ease;
+    }
+    .chip:hover { border-color: var(--color-primary); color: var(--color-primary); background: var(--color-primary-soft); }
+
+    .chat-box {
+      height: 460px;
+      overflow: auto;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 12px;
+      background: linear-gradient(180deg, var(--color-surface-soft), transparent 45%);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .empty-chat {
+      border: 1px dashed var(--color-border);
+      border-radius: 10px;
+      padding: 12px;
+      color: var(--color-text-subtle);
+      background: var(--color-surface-soft);
+    }
+
+    .msg {
+      border: 1px solid transparent;
+      border-radius: 12px;
+      padding: 10px 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 14px;
+    }
+    .command-card-title {
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .msg.user { border-color: rgba(37,99,235,.28); background: var(--color-primary-soft); }
+    .msg.assistant { border-color: rgba(22,163,74,.25); background: var(--color-success-soft); }
+    .msg.system { border-color: rgba(217,119,6,.35); background: var(--color-warning-soft); }
+    .msg.error { border-color: rgba(220,38,38,.35); background: var(--color-error-soft); }
+
+    .status-banner {
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      padding: 9px 11px;
+      background: var(--color-surface-soft);
+      font-size: 13px;
+    }
+    .status-banner.warn { border-color: var(--color-warning); background: var(--color-warning-soft); }
+    .status-banner.success { border-color: var(--color-success); background: var(--color-success-soft); }
+    .status-banner.error { border-color: var(--color-error); background: var(--color-error-soft); }
+
+    .security-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border: 1px solid var(--color-warning);
+      border-radius: 12px;
+      background: var(--color-warning-soft);
+      padding: 11px;
+    }
+
+    .input-row { display: flex; align-items: center; gap: 8px; }
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      padding: 10px 11px;
+      background: var(--color-surface-soft);
+      color: var(--color-text);
+      font: inherit;
+    }
+    input::placeholder, textarea::placeholder { color: var(--color-text-subtle); }
+
+    .chat-composer { display: grid; gap: 8px; }
+    #chatInput { min-height: 46px; max-height: 120px; resize: vertical; }
+    .composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+    button, .btn {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 9px 13px;
+      cursor: pointer;
+      transition: .15s ease;
+      font: inherit;
+      background: var(--color-primary);
+      color: #fff;
+      border-color: var(--color-primary);
+    }
+    button:hover, .btn:hover { transform: translateY(-1px); opacity: .96; }
+    button:disabled, .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+    .btn-primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+    .btn-secondary, button.secondary { background: #334155; color: #fff; border-color: #334155; }
+    .btn-ghost { background: transparent; color: var(--color-text); border-color: var(--color-border); }
+    .btn-danger { background: var(--color-error); color: #fff; border-color: var(--color-error); }
+
+    .chat-side { display: flex; flex-direction: column; gap: 12px; }
+    .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .summary-item {
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      padding: 10px;
+      background: var(--color-surface-soft);
+    }
+    .summary-item strong { display: block; color: var(--color-text-subtle); font-size: 12px; margin-bottom: 4px; }
+    .summary-item span { font-size: 14px; font-weight: 600; word-break: break-word; }
+
+    .quick-actions, .security-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .help-panel-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .help-panel-body { margin-top: 8px; white-space: pre-wrap; }
+
+    .progress-wrap { margin-top: 8px; display: grid; gap: 6px; }
+    .progress-track {
+      width: 100%;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--color-surface-soft);
+      border: 1px solid var(--color-border);
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0;
+      background: linear-gradient(90deg, var(--color-primary), #38bdf8);
+      transition: width .25s ease;
+    }
+
+    .events-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    .events-list li {
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      padding: 8px 9px;
+      background: var(--color-surface-soft);
+      font-size: 13px;
+    }
+    .events-list li.warn { border-color: var(--color-warning); background: var(--color-warning-soft); }
+    .events-list li.success { border-color: var(--color-success); background: var(--color-success-soft); }
+    .events-list li.error { border-color: var(--color-error); background: var(--color-error-soft); }
+    .event-time { color: var(--color-text-subtle); margin-right: 6px; }
+
+    .row { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
+    .note-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+    textarea#noteEditor { width: 100%; min-height: 260px; resize: vertical; font-family: Consolas, monospace; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: flex-end;
+      justify-content: flex-end;
+      background: rgba(15, 23, 42, 0.35);
+      -webkit-backdrop-filter: blur(2px);
+      backdrop-filter: blur(2px);
+      z-index: 999;
+    }
+    .modal {
+      width: min(860px, 92vw);
+      height: min(100vh, 100%);
+      border-left: 1px solid var(--color-border);
+      background: var(--color-surface);
+      box-shadow: var(--shadow-md);
+      display: flex;
+      flex-direction: column;
+    }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid var(--color-border);
+      padding: 16px 18px;
+    }
+    .modal-title { display: flex; flex-direction: column; gap: 4px; }
+    .modal-actions { display: flex; align-items: center; gap: 8px; }
+    .icon-btn { min-width: 40px; font-size: 18px; line-height: 1; background: #111827; color: #fff; }
+    .modal-body { padding: 16px 18px; overflow: auto; }
+    .log-box {
+      min-height: 420px;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 13px;
+      background: var(--color-surface-soft);
+      white-space: pre-wrap;
+      font-family: Consolas, monospace;
+      overflow: auto;
+    }
+
+    @media (max-width: 1024px) {
+      .workspace { grid-template-columns: 1fr; }
+      .chat-main { min-height: initial; }
+    }
+    @media (max-width: 900px) {
+      .row, .grid2, .summary-grid { grid-template-columns: 1fr; }
+      .chat-box { height: 400px; }
+    }
+    @media (max-width: 640px) {
+      .wrap { padding: 10px; }
+      .app-header { grid-template-columns: 1fr; }
+      .header-controls { justify-content: flex-start; }
+      .chat-box { height: 360px; }
+      .input-row { flex-direction: column; align-items: stretch; }
+      .composer-foot { flex-direction: column; align-items: stretch; }
+      .security-actions, .quick-actions { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="app-header">
+      <div>
+        <h1>AgentLearn 工作台</h1>
+        <p class="muted header-subtitle">聊天 / 笔记管理 / 配置管理 / 系统状态 / 后台管理</p>
+      </div>
+      <div class="header-controls">
+        <label class="muted" for="themeSelect">主题</label>
+        <select id="themeSelect" class="theme-select" aria-label="主题切换">
+          <option value="system">跟随系统</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+        </select>
+      </div>
+    </header>
+
+    <div class="guide" id="guideBox">
+      新手引导：① 去“配置页”填 API 参数并测试连接；② 去“笔记管理页”增删改笔记；③ 切回聊天页开始提问。
+    </div>
+
+    <nav class="tabs" aria-label="页面导航">
+      <button type="button" id="tabChat" class="active">聊天页</button>
+      <button type="button" id="tabNotes">笔记管理页</button>
+      <button type="button" id="tabConfig">配置页</button>
+      <button type="button" id="tabSystem">系统状态页</button>
+      <button type="button" id="tabAdmin">后台管理</button>
+    </nav>
+
+    <div id="chatPage" class="chat-page">
+      <div class="workspace">
+        <section class="card chat-main">
+          <div class="hero-head">
+            <div>
+              <h2>本地智能笔记助理</h2>
+              <p class="muted">支持直接提问、列出笔记、图片问答、配置查看、指标查看和索引重建。</p>
+            </div>
+            <span class="state-pill" id="chatStateBadge">状态：就绪</span>
+          </div>
+
+          <div class="chips" id="exampleQuestions">
+            <button type="button" class="chip" data-question="本地有什么笔记">本地有什么笔记</button>
+            <button type="button" class="chip" data-question="帮我总结某篇笔记的重点">总结某篇笔记</button>
+            <button type="button" class="chip" data-question="不要ocr，看一下这张图">不要 OCR 看图</button>
+            <button type="button" class="chip" data-question="/help">查看帮助</button>
+            <button type="button" class="chip" data-question="/metrics">查看指标</button>
+          </div>
+
+          <div id="chatBox" class="chat-box" aria-live="polite">
+            <div id="emptyChat" class="empty-chat">还没有对话。你可以先点上方示例问题，或输入“本地有什么笔记”。</div>
+          </div>
+
+          <div id="chatBanner" class="status-banner hidden"></div>
+
+          <div id="securityPanel" class="security-panel hidden">
+            <div class="muted" id="securityHint">检测到受限查询，请输入访问口令。</div>
+            <div class="input-row">
+              <input id="securityKeyInput" type="password" placeholder="输入访问口令" aria-label="访问口令" />
+            </div>
+            <div class="security-actions">
+              <button type="button" id="submitSecurityKeyBtn">提交访问口令</button>
+              <button type="button" id="abortAccessTicketBtn" class="secondary">中止本次查询</button>
+              <button type="button" id="closeSecurityPanelBtn" class="secondary">关闭弹窗</button>
+            </div>
+          </div>
+
+          <div class="chat-composer">
+            <textarea id="chatInput" placeholder="输入你的问题，例如：帮我总结本地 LangGraph 笔记" aria-label="聊天输入"></textarea>
+            <div class="composer-foot">
+              <span class="muted" id="composerHint">Enter 发送，Shift + Enter 换行</span>
+              <button type="button" id="sendBtn">发送</button>
+            </div>
+          </div>
+        </section>
+
+        <aside class="chat-side">
+          <section class="card">
+            <h3>运行摘要</h3>
+            <div id="healthSummary" class="summary-grid">
+              <div class="summary-item"><strong>当前模型</strong><span id="summaryModel">读取中...</span></div>
+              <div class="summary-item"><strong>API 模式</strong><span id="summaryApiMode">读取中...</span></div>
+              <div class="summary-item"><strong>配置状态</strong><span id="summaryConfig">读取中...</span></div>
+              <div class="summary-item"><strong>笔记数量</strong><span id="summaryNotes">读取中...</span></div>
+            </div>
+          </section>
+
+          <section class="card">
+            <h3>快捷操作</h3>
+            <div class="quick-actions mt-8">
+              <button type="button" id="helpBtn" class="secondary">帮助</button>
+              <button type="button" id="configSummaryBtn" class="secondary">查看配置</button>
+              <button type="button" id="metricsBtn" class="secondary">查看指标</button>
+              <button type="button" id="updateBtn">重建索引</button>
+            </div>
+            <p class="muted mt-8-top-only">也支持在输入框直接输入：/help /files /config /metrics /update</p>
+            <div id="helpPanel" class="guide hidden mt-10">
+              <div class="help-panel-head">
+                <strong>帮助面板</strong>
+                <button type="button" id="closeHelpPanelBtn" class="secondary">收起</button>
+              </div>
+              <div class="muted help-panel-body">
+可直接提问，也可以使用本地命令：
+- /help：查看帮助
+- /files：列出本地笔记
+- /config：查看当前配置摘要
+- /metrics：查看运行指标
+- /update：触发索引重建
+示例问题：本地有什么笔记 / 帮我总结某篇笔记 / 不要ocr，看一下这张图
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <h3>笔记与索引</h3>
+            <div class="input-row mt-8">
+              <button type="button" id="refreshNotesBtn" class="secondary">刷新笔记列表</button>
+              <button type="button" id="rebuildBtn">重建索引</button>
+            </div>
+            <p class="muted mt-8-top-only" id="status">就绪</p>
+            <div class="progress-wrap">
+              <div class="progress-track"><div id="rebuildProgressFill" class="progress-fill"></div></div>
+              <div id="rebuildProgressLabel" class="muted">索引进度：0%</div>
+            </div>
+            <ul id="notesList"></ul>
+          </section>
+
+          <section class="card">
+            <h3>最近系统事件</h3>
+            <p class="muted">仅展示关键反馈：检索命中/未命中、索引状态、请求失败、配置测试。</p>
+            <ul id="recentEvents" class="events-list"></ul>
+          </section>
+        </aside>
+      </div>
+    </div>
+
+    <div id="notesPage" class="row hidden">
+      <section class="card">
+        <h3>笔记管理</h3>
+        <div class="input-row mt-8">
+          <select id="noteSelect" aria-label="选择笔记" title="选择笔记"></select>
+          <button type="button" id="loadNoteBtn" class="secondary">加载</button>
+        </div>
+        <div class="note-actions">
+          <input id="newPathInput" placeholder="新建路径，如 demo/new.md" />
+          <button type="button" id="createNoteBtn">新建</button>
+          <button type="button" id="saveNoteBtn" class="secondary">保存</button>
+          <button type="button" id="deleteNoteBtn" class="secondary">删除</button>
+        </div>
+        <div class="note-actions">
+          <input id="renamePathInput" placeholder="重命名到，如 demo/renamed.md" />
+          <button type="button" id="renameNoteBtn" class="secondary">重命名</button>
+        </div>
+        <div class="note-actions">
+          <input id="uploadFileInput" type="file" accept=".md,.txt,.png,.jpg,.jpeg,.webp,.bmp" title="选择要上传的笔记或图片文件" aria-label="上传笔记或图片文件" />
+          <button type="button" id="uploadBtn">上传</button>
+        </div>
+        <textarea id="noteEditor" placeholder="这里编辑笔记内容（仅文本笔记）..."></textarea>
+      </section>
+      <section class="card">
+        <h3>索引任务状态</h3>
+        <p class="muted" id="indexStatusText">未开始</p>
+        <div class="input-row mt-8">
+          <button type="button" id="refreshIndexStatusBtn" class="secondary">刷新状态</button>
+          <button type="button" id="manualRebuildBtn">手动重建</button>
+          <button type="button" id="showRebuildLogsBtn" class="secondary">查看详情日志</button>
+        </div>
+        <p class="muted">离开笔记管理页且有变更时，会自动执行 update 并等待完成。</p>
+      </section>
+    </div>
+
+    <div id="configPage" class="hidden">
+      <section class="card">
+        <h3>配置管理</h3>
+        <div class="grid2 mt-10">
+          <input id="cfg_BASE_URL" placeholder="BASE_URL" />
+          <input id="cfg_API_KEY" placeholder="API_KEY" />
+          <input id="cfg_MODEL" placeholder="MODEL" />
+          <select id="cfg_API_MODE"><option value="responses">responses</option><option value="chat">chat</option></select>
+          <input id="cfg_REQUEST_TIMEOUT" placeholder="REQUEST_TIMEOUT" />
+          <input id="cfg_REQUEST_MAX_RETRIES" placeholder="REQUEST_MAX_RETRIES" />
+          <input id="cfg_REQUEST_RETRY_BACKOFF_MS" placeholder="REQUEST_RETRY_BACKOFF_MS" />
+          <input id="cfg_RERANKER_MODEL" placeholder="RERANKER_MODEL" />
+          <select id="cfg_RERANKER_ENABLED"><option value="false">false</option><option value="true">true</option></select>
+          <select id="cfg_ENABLE_IMAGE_OCR"><option value="true">true</option><option value="false">false</option></select>
+          <select id="cfg_ENABLE_IMAGE_VLM"><option value="true">true</option><option value="false">false</option></select>
+          <input id="cfg_VISION_MODEL" placeholder="VISION_MODEL" />
+          <input id="cfg_ALLOWED_TOOLS" placeholder="ALLOWED_TOOLS" />
+          <select id="cfg_OTEL_ENABLED"><option value="false">false</option><option value="true">true</option></select>
+          <input id="cfg_LOG_FILE" placeholder="LOG_FILE" />
+          <input id="cfg_RESTRICTED_QUERY_LIMIT_PER_MINUTE" placeholder="RESTRICTED_QUERY_LIMIT_PER_MINUTE" />
+        </div>
+        <div class="input-row mt-10">
+          <button type="button" id="loadConfigBtn" class="secondary">读取配置</button>
+          <button type="button" id="saveConfigBtn">保存配置</button>
+          <button type="button" id="testConfigBtn" class="secondary">测试连接</button>
+          <button type="button" id="resetConfigBtn" class="secondary">恢复默认</button>
+        </div>
+        <p class="muted" id="configStatus">就绪</p>
+      </section>
+    </div>
+
+    <div id="systemPage" class="hidden">
+      <section class="card">
+        <h3>系统状态</h3>
+        <div class="input-row mt-8">
+          <button type="button" id="refreshSystemBtn">刷新系统状态</button>
+        </div>
+        <pre id="systemStatusBox" class="kv"></pre>
+      </section>
+    </div>
+
+    <div id="adminPage" class="hidden">
+      <section class="card">
+        <h3>后台管理（开发调试）</h3>
+        <div class="input-row mt-8">
+          <button type="button" id="refreshAdminBtn">刷新后台信息</button>
+        </div>
+        <p class="muted">用于开发阶段查看后端路径、运行状态、配置是否生效，以及最近日志/报错信息。</p>
+        <pre id="adminStatusBox" class="kv"></pre>
+      </section>
+    </div>
+
+    <div id="rebuildLogModal" class="modal-backdrop hidden">
+      <div class="modal">
+        <div class="modal-head">
+          <div class="modal-title">
+            <strong>索引重建详情</strong>
+            <div id="rebuildLogMeta" class="muted">用于查看原命令行输出，不影响当前页面切换。</div>
+          </div>
+          <div class="modal-actions">
+            <button type="button" id="refreshRebuildLogsBtn" class="secondary">刷新</button>
+            <button type="button" id="closeRebuildLogModalBtn" class="icon-btn" aria-label="关闭详情窗口" title="关闭">×</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <p class="muted">这里会实时显示索引重建、RAG 初始化、Faiss/OCR/图片模型等后台输出。按 <code>Esc</code> 或右上角 <strong>×</strong> 可关闭。</p>
+          <pre id="rebuildLogBox" class="log-box"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

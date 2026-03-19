@@ -21,7 +21,6 @@ tmp_uvicorn_err.log
 .git_status.txt
 .DS_Store
 Thumbs.db
-优化任务清单.md
 CLAUDE.md
 
 # Observability artifacts

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-cli"
+version = "0.3.0"
+description = "本地智能笔记助理 CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Agent Project" }
+]
+dependencies = [
+  "openai",
+  "python-dotenv",
+  "langchain",
+  "langchain-openai",
+  "langchain-community",
+  "langchain-huggingface",
+  "faiss-cpu",
+  "sentence-transformers",
+  "Pillow",
+  "numpy",
+  "rapidocr-onnxruntime",
+  "huggingface-hub>=0.33.4,<1.0.0",
+  "transformers<5.0.0",
+  "bcrypt",
+  "opentelemetry-api",
+  "opentelemetry-sdk",
+  "fastapi",
+  "uvicorn",
+  "python-multipart"
+]
+
+[project.scripts]
+agent = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "app_web", "rag_engine"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["config*", "core*", "infra*", "workflow*", "cli*"]

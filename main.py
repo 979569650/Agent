@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -94,6 +95,39 @@ def ui_hint(text: str) -> str:
 
 def ui_label(text: str) -> str:
     return paint(text, COLOR_BOLD)
+
+
+def _terminal_width(fallback: int = 88) -> int:
+    try:
+        return max(40, shutil.get_terminal_size((fallback, 20)).columns)
+    except Exception:
+        return fallback
+
+
+def ui_divider(char: str = "─", width: Optional[int] = None) -> str:
+    line_width = width if width is not None else _terminal_width()
+    line_width = max(8, int(line_width))
+    return ui_hint(char * line_width)
+
+
+def ui_badge(text: str) -> str:
+    return paint(f"[{text}]", COLOR_BOLD, COLOR_BLUE)
+
+
+def ui_kv(key: str, value: str) -> str:
+    return f"{ui_label(key)} {value}"
+
+
+def _shorten_middle(text: str, max_len: int = 68, ellipsis: str = "...") -> str:
+    if max_len <= len(ellipsis) + 2:
+        return text[:max_len]
+    if len(text) <= max_len:
+        return text
+
+    remain = max_len - len(ellipsis)
+    left = remain // 2
+    right = remain - left
+    return f"{text[:left]}{ellipsis}{text[-right:]}"
 
 
 def configure_stdio() -> None:
@@ -290,11 +324,14 @@ def ensure_startup(settings: Settings, rag: RAGEngine) -> bool:
     return True
 
 
-def run_agent_once(app, chat_history):
+def run_agent_once(app, chat_history, stream_sink: Optional[Callable[[str], None]] = None):
     def _run():
         final_response = None
         event = None
-        for event in app.stream({"messages": chat_history}, stream_mode="values"):
+        state = {"messages": chat_history}
+        if stream_sink is not None:
+            state["stream_sink"] = stream_sink
+        for event in app.stream(state, stream_mode="values"):
             final_response = event["messages"][-1]
         if event is None or final_response is None:
             raise RuntimeError("未获取到模型响应")
@@ -305,13 +342,21 @@ def run_agent_once(app, chat_history):
 
 def _build_status_lines(settings: Settings, no_banner: bool = False) -> List[str]:
     show_banner = not no_banner and not FLAGS.quiet
-    lines: List[str] = []
-    if show_banner:
-        lines.append(ui_title("Agent CLI"))
-        lines.append(ui_hint("本地智能笔记助理"))
-        lines.append(ui_hint(f"model={settings.model_name} · mode={settings.api_mode}"))
-        lines.append(ui_hint(f"endpoint={settings.base_url}"))
-        lines.append(ui_hint("输入 help 查看命令，输入 quit 退出"))
+    if not show_banner:
+        return []
+
+    width = _terminal_width()
+    endpoint = _shorten_middle(str(settings.base_url), max_len=max(36, width - 14))
+
+    lines: List[str] = [
+        ui_divider(width=width),
+        ui_title("Agent CLI"),
+        ui_hint("本地智能笔记助理"),
+        f"{ui_badge(f'model {settings.model_name}')} {ui_badge(f'mode {settings.api_mode}')}",
+        ui_kv("endpoint", endpoint),
+        ui_hint("命令: help 查看帮助 · files/config/metrics/update · quit 退出"),
+        ui_divider(width=width),
+    ]
     return lines
 
 
@@ -356,6 +401,7 @@ def _run_chat_command(
     app,
     chat_history,
     on_progress_line: Optional[Callable[[str], None]] = None,
+    on_assistant_chunk: Optional[Callable[[str], None]] = None,
 ):
     lowered = user_input.lower()
     if lowered in ["q", "quit", "exit"]:
@@ -387,7 +433,7 @@ def _run_chat_command(
 
     next_history = list(chat_history)
     next_history.append(HumanMessage(content=user_input))
-    final_response, new_history = run_agent_once(app, next_history)
+    final_response, new_history = run_agent_once(app, next_history, stream_sink=on_assistant_chunk)
     return {
         "kind": "assistant",
         "answer": final_response.content,
@@ -410,8 +456,28 @@ def run_chat_interactive_plain(settings: Settings, rag: RAGEngine, app, no_banne
             if not user_input:
                 continue
 
-            if not FLAGS.quiet and not _is_interactive_command(user_input):
+            is_plain_question = not _is_interactive_command(user_input)
+            if not FLAGS.quiet and is_plain_question:
                 out("\n" + ui_hint("助手思考中..."), force=True)
+
+            terminal_stream = getattr(sys, "__stdout__", sys.stdout)
+            streamed_any = False
+            streamed_text_parts: List[str] = []
+
+            def _on_assistant_chunk(chunk: str) -> None:
+                nonlocal streamed_any
+                if not is_plain_question:
+                    return
+                if not chunk:
+                    return
+                streamed_text_parts.append(chunk)
+                if not streamed_any:
+                    terminal_stream.write("\n" + ui_assistant_prefix() + "\n")
+                    streamed_any = True
+                terminal_stream.write(chunk)
+                if hasattr(terminal_stream, "flush"):
+                    terminal_stream.flush()
+
             result = _run_chat_command(
                 user_input,
                 settings,
@@ -419,6 +485,7 @@ def run_chat_interactive_plain(settings: Settings, rag: RAGEngine, app, no_banne
                 app,
                 chat_history,
                 on_progress_line=lambda line: safe_print(line, stream=getattr(sys, "__stdout__", sys.stdout)),
+                on_assistant_chunk=_on_assistant_chunk if is_plain_question else None,
             )
             chat_history = result["chat_history"]
 
@@ -430,8 +497,16 @@ def run_chat_interactive_plain(settings: Settings, rag: RAGEngine, app, no_banne
                 out(result["text"])
                 continue
 
-            out("\n" + ui_assistant_prefix(), force=True)
-            out(result["answer"], force=True)
+            if streamed_any:
+                streamed_text = "".join(streamed_text_parts)
+                if streamed_text != str(result["answer"]):
+                    terminal_stream.write("\r\n")
+                    terminal_stream.write(ui_warn("[提示] 流式与最终结果不一致，以下为最终答案：") + "\n")
+                    terminal_stream.write(str(result["answer"]))
+                out("", force=True)
+            else:
+                out("\n" + ui_assistant_prefix(), force=True)
+                out(result["answer"], force=True)
 
         except KeyboardInterrupt:
             out("\n" + ui_warn("已中断。"), force=True)
@@ -462,6 +537,17 @@ def run_chat_interactive_fullscreen(settings: Settings, rag: RAGEngine, app, no_
             safe_print("\n".join(screen_lines), stream=terminal_stream)
         safe_print("", stream=terminal_stream)
 
+    def redraw_with_pending(pending_assistant: str) -> None:
+        terminal_stream = getattr(sys, "__stdout__", sys.stdout)
+        safe_print("\x1b[2J\x1b[H", stream=terminal_stream)
+        lines = list(screen_lines)
+        if pending_assistant:
+            lines.append(ui_assistant_prefix())
+            lines.append(pending_assistant)
+        if lines:
+            safe_print("\n".join(lines), stream=terminal_stream)
+        safe_print("", stream=terminal_stream)
+
     try:
         with AlternateScreenSession():
             redraw()
@@ -472,9 +558,25 @@ def run_chat_interactive_fullscreen(settings: Settings, rag: RAGEngine, app, no_
                         continue
 
                     screen_lines.append(f"{ui_user_prompt()}{user_input}")
-                    if not FLAGS.quiet and not _is_interactive_command(user_input):
+                    is_plain_question = not _is_interactive_command(user_input)
+                    if not FLAGS.quiet and is_plain_question:
                         screen_lines.append(ui_hint("助手思考中..."))
                     redraw()
+
+                    pending_assistant = ""
+                    last_redraw_at = 0.0
+
+                    def _on_assistant_chunk(chunk: str) -> None:
+                        nonlocal pending_assistant, last_redraw_at
+                        if not is_plain_question:
+                            return
+                        if not chunk:
+                            return
+                        pending_assistant += chunk
+                        now = time.perf_counter()
+                        if now - last_redraw_at >= 0.05:
+                            redraw_with_pending(pending_assistant)
+                            last_redraw_at = now
 
                     result = _run_chat_command(
                         user_input,
@@ -483,6 +585,7 @@ def run_chat_interactive_fullscreen(settings: Settings, rag: RAGEngine, app, no_
                         app,
                         chat_history,
                         on_progress_line=lambda line: (screen_lines.append(line), redraw()),
+                        on_assistant_chunk=_on_assistant_chunk if is_plain_question else None,
                     )
                     chat_history = result["chat_history"]
 
@@ -492,8 +595,12 @@ def run_chat_interactive_fullscreen(settings: Settings, rag: RAGEngine, app, no_
                     if result["kind"] == "text":
                         screen_lines.append(result["text"])
                     else:
-                        screen_lines.append(ui_assistant_prefix())
-                        screen_lines.append(result["answer"])
+                        if pending_assistant:
+                            screen_lines.append(ui_assistant_prefix())
+                            screen_lines.append(result["answer"])
+                        else:
+                            screen_lines.append(ui_assistant_prefix())
+                            screen_lines.append(result["answer"])
                     redraw()
 
                 except EOFError:

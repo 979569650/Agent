@@ -28,7 +28,10 @@ infra/retrieval/search_pipeline.py
 infra/retrieval/storage_utils.py
 tests/test_cli_fullscreen_terminal.py
 tests/test_integration_agent_flow.py
+tests/test_main_cli_streaming.py
+tests/test_main_cli_ui.py
 tests/test_model_reranker.py
+tests/test_openai_compatible_stream.py
 tests/test_policies.py
 tests/test_retrieval_planner.py
 tests/test_search_pipeline.py

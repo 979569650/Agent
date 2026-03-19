@@ -11,9 +11,13 @@ from workflow.nodes.agent_node import create_agent_node
 class _FakeLLM:
     def __init__(self):
         self.last_messages = None
+        self.last_on_delta = None
 
-    def call_model(self, messages):
+    def call_model(self, messages, on_delta=None):
         self.last_messages = messages
+        self.last_on_delta = on_delta
+        if callable(on_delta):
+            on_delta("ok")
         return "ok"
 
 
@@ -132,6 +136,22 @@ class TestAgentIntegrationFlow(unittest.TestCase):
         self.assertFalse(second.get("ticket_required", False))
         self.assertNotIn("ticket_id", second)
         self.assertIn("受限查询过于频繁", second["messages"][0].content)
+
+    def test_stream_sink_passed_to_llm(self):
+        llm = _FakeLLM()
+        rag = _FakeRAG(context="[文本来源]\nhello")
+        agent = create_agent_node(self._build_settings(), llm, rag, SlidingWindowFrequencyGuard(3, 60))
+
+        chunks = []
+        state = {
+            "messages": [SystemMessage(content="sys"), HumanMessage(content="帮我检索Agent总结")],
+            "stream_sink": chunks.append,
+        }
+        out = agent(state)
+
+        self.assertEqual(out["messages"][0].content, "ok")
+        self.assertTrue(callable(llm.last_on_delta))
+        self.assertEqual(chunks, ["ok"])
 
 
 

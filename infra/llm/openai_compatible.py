@@ -1,5 +1,7 @@
-from typing import List
+from typing import List, Callable
+import json
 import time
+
 import requests
 from langchain_core.messages import BaseMessage
 
@@ -93,6 +95,60 @@ class OpenAICompatibleClient:
 
         raise RuntimeError(f"请求失败(重试{max_attempts}次后仍失败): {type(last_error).__name__}: {last_error}")
 
+    def _stream_post(self, path: str, payload: dict):
+        if not self.settings.base_url or not self.settings.api_key:
+            raise RuntimeError("缺少 BASE_URL 或 API_KEY 配置")
+
+        url = f"{self.settings.base_url}{path}"
+        headers = {
+            "Authorization": f"Bearer {self.settings.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=self.settings.request_timeout,
+            stream=True,
+        )
+        status = resp.status_code
+        if status >= 400:
+            body = ""
+            try:
+                body = resp.text[:400]
+            except Exception:
+                body = ""
+            raise RuntimeError(f"HTTP {status} @ {path}: {body}")
+        return resp
+
+    def _iter_sse_data(self, resp):
+        for raw_line in resp.iter_lines(decode_unicode=False):
+            if not raw_line:
+                continue
+
+            if isinstance(raw_line, bytes):
+                try:
+                    line = raw_line.decode("utf-8")
+                except Exception:
+                    fallback_encoding = getattr(resp, "encoding", None) or "utf-8"
+                    line = raw_line.decode(fallback_encoding, errors="replace")
+            else:
+                line = str(raw_line)
+
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith("data:"):
+                data = line[5:].strip()
+            else:
+                data = line
+
+            if not data or data == "[DONE]":
+                continue
+            yield data
+
     def call_responses(self, messages: List[BaseMessage]) -> str:
         response = self._post(
             "/responses",
@@ -116,6 +172,39 @@ class OpenAICompatibleClient:
                         chunks.append(t)
         return "\n".join(chunks).strip()
 
+    def call_responses_stream(self, messages: List[BaseMessage], on_delta: Callable[[str], None]) -> str:
+        payload = {
+            "model": self.settings.model_name,
+            "input": self._to_responses_input(messages),
+            "stream": True,
+        }
+
+        chunks: List[str] = []
+        resp = self._stream_post("/responses", payload)
+        try:
+            for data in self._iter_sse_data(resp):
+                try:
+                    event = json.loads(data)
+                except Exception:
+                    continue
+
+                delta = ""
+                event_type = str(event.get("type", ""))
+                if event_type == "response.output_text.delta":
+                    delta = event.get("delta", "") or ""
+                elif event_type == "response.delta":
+                    delta = event.get("delta", "") or ""
+                elif "delta" in event and isinstance(event.get("delta"), str):
+                    delta = event.get("delta", "") or ""
+
+                if delta:
+                    chunks.append(delta)
+                    on_delta(delta)
+        finally:
+            resp.close()
+
+        return "".join(chunks)
+
     def call_chat_completions(self, messages: List[BaseMessage]) -> str:
         response = self._post(
             "/chat/completions",
@@ -130,14 +219,54 @@ class OpenAICompatibleClient:
         msg = choices[0].get("message", {})
         return msg.get("content", "") or ""
 
-    def call_model(self, messages: List[BaseMessage]) -> str:
+    def call_chat_completions_stream(self, messages: List[BaseMessage], on_delta: Callable[[str], None]) -> str:
+        payload = {
+            "model": self.settings.model_name,
+            "messages": self._to_chat_messages(messages),
+            "stream": True,
+        }
+
+        chunks: List[str] = []
+        resp = self._stream_post("/chat/completions", payload)
+        try:
+            for data in self._iter_sse_data(resp):
+                try:
+                    event = json.loads(data)
+                except Exception:
+                    continue
+
+                choices = event.get("choices", []) or []
+                if not choices:
+                    continue
+
+                delta_obj = choices[0].get("delta", {}) or {}
+                delta = delta_obj.get("content", "") or ""
+                if delta:
+                    chunks.append(delta)
+                    on_delta(delta)
+        finally:
+            resp.close()
+
+        return "".join(chunks)
+
+    def call_model(self, messages: List[BaseMessage], on_delta: Callable[[str], None] | None = None) -> str:
         if self.settings.api_mode == "responses":
+            if on_delta is not None:
+                try:
+                    return self.call_responses_stream(messages, on_delta)
+                except Exception:
+                    return self.call_responses(messages)
             try:
                 return self.call_responses(messages)
             except Exception as e:
                 raise RuntimeError(f"/responses 调用失败 | model={self.settings.model_name} | {type(e).__name__}: {e}")
 
         if self.settings.api_mode == "chat":
+            if on_delta is not None:
+                try:
+                    return self.call_chat_completions_stream(messages, on_delta)
+                except Exception:
+                    return self.call_chat_completions(messages)
             try:
                 return self.call_chat_completions(messages)
             except Exception as e:

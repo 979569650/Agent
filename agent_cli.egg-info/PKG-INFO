@@ -37,6 +37,8 @@ Requires-Dist: python-multipart
 
 ## 1. 你会先用到什么（30 秒上手）
 
+### 1.1 直接运行（不安装命令）
+
 ```bash
 # 1) 安装依赖
 python -m venv .venv
@@ -53,13 +55,21 @@ python main.py doctor
 python main.py chat -i
 ```
 
-如果你想安装成系统命令：
+### 1.2 安装成系统命令 `agent`
 
 ```bash
+# 开发模式安装（推荐，源码改动可立即生效）
 pip install -e .
+
+# 或：普通安装
+# pip install .
+
 agent --help
+agent doctor
 agent chat -i
 ```
+
+> 若你之前安装过旧版本，建议先执行 `pip uninstall agent-cli` 后再重新安装。
 
 ---
 
@@ -156,6 +166,47 @@ python -m uvicorn app_web:app --host 127.0.0.1 --port 8000 --reload
 
 访问：`http://127.0.0.1:8000`
 
+### 3.7 安装 / 使用 / 卸载 `agent` 命令
+
+#### 安装
+
+```bash
+# 进入项目根目录后执行
+pip install -e .
+
+# 验证
+agent --version
+agent --help
+```
+
+#### 使用
+
+```bash
+# 等价于 python main.py chat -i
+agent chat -i
+
+# 单次提问
+agent ask "列出我最近的 TODO"
+
+# 重建索引（文本模式会实时输出过程）
+agent index-rebuild
+
+# JSON 输出（便于脚本调用）
+agent doctor --output json
+```
+
+#### 卸载
+
+```bash
+pip uninstall agent-cli
+```
+
+可选清理（按需手动删除）：
+- 虚拟环境：`.venv/`
+- 本地配置：`.env`
+- 运行日志：`observability/events.jsonl`
+- 索引文件：项目运行后生成的本地索引目录/文件
+
 ---
 
 ## 4. CLI 使用教程
@@ -201,6 +252,8 @@ python main.py chat -i --no-fullscreen
 
 ### 4.2 子命令（非交互）
 
+#### 方式 A：直接运行源码入口
+
 ```bash
 python main.py chat -m "帮我总结本地笔记"
 python main.py chat --stdin
@@ -212,6 +265,19 @@ python main.py index-rebuild
 python main.py doctor
 ```
 
+#### 方式 B：安装后使用 `agent` 命令
+
+```bash
+agent chat -m "帮我总结本地笔记"
+agent chat --stdin
+agent ask "列出我最近的 TODO"
+agent files
+agent config
+agent metrics
+agent index-rebuild
+agent doctor
+```
+
 别名：
 - `files` = `ls`
 - `config` = `cfg`
@@ -221,9 +287,15 @@ python main.py doctor
 ### 4.3 输出格式
 
 ```bash
+# python main.py 方式
 python main.py ask "帮我总结" --output json
 python main.py files --output json
 python main.py doctor --output json
+
+# agent 方式
+agent ask "帮我总结" --output json
+agent files --output json
+agent doctor --output json
 ```
 
 ### 4.4 全局参数
@@ -235,9 +307,15 @@ python main.py doctor --output json
 示例：
 
 ```bash
+# python main.py 方式
 python main.py --color always chat -i
 python main.py --quiet ask "今天待办"
 python main.py --verbose doctor
+
+# agent 方式
+agent --color always chat -i
+agent --quiet ask "今天待办"
+agent --verbose doctor
 ```
 
 ---
@@ -300,6 +378,8 @@ API_MODE=chat
 
 ```bash
 python main.py index-rebuild
+# 或
+agent index-rebuild
 ```
 
 ---

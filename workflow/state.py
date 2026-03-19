@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, List, TypedDict
+from typing import Annotated, List, TypedDict, Callable
 
 from langchain_core.messages import BaseMessage
 
@@ -13,4 +13,5 @@ class AgentState(TypedDict, total=False):
     abort_ticket: bool
     ticket_required: bool
     security_status: str
+    stream_sink: Callable[[str], None]
 

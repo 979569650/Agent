@@ -126,6 +126,7 @@ def create_agent_node(
         access_code = state.get("access_code")
         ticket_id = state.get("ticket_id")
         abort_ticket = bool(state.get("abort_ticket", False))
+        stream_sink = state.get("stream_sink")
 
         last_user_query = ""
         for msg in reversed(messages):
@@ -252,7 +253,10 @@ def create_agent_node(
                 log_event("retrieval_skipped", trace_id, reason="smalltalk_or_non_retrieval_intent")
 
             try:
-                reply = llm_client.call_model(messages)
+                if callable(stream_sink):
+                    reply = llm_client.call_model(messages, on_delta=stream_sink)
+                else:
+                    reply = llm_client.call_model(messages)
             except Exception as e:
                 runtime_metrics.mark_error()
                 log_event("response_failed", trace_id, error=type(e).__name__, detail=str(e)[:200])

@@ -1,8 +1,8 @@
 Metadata-Version: 2.4
-Name: agent-cli
+Name: smart-note-assistant
 Version: 0.3.0
-Summary: 本地智能笔记助理 CLI
-Author: Agent Project
+Summary: 智能笔记助手 CLI
+Author: 智能笔记助手
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 Requires-Dist: openai
@@ -25,7 +25,7 @@ Requires-Dist: fastapi
 Requires-Dist: uvicorn
 Requires-Dist: python-multipart
 
-# Agent CLI：本地智能笔记助理（OpenAI 兼容 + 多模态 RAG）
+# 智能笔记助手（OpenAI 兼容 + 多模态 RAG）
 
 一个面向本地笔记管理的智能助理项目，支持：
 
@@ -55,21 +55,32 @@ python main.py doctor
 python main.py chat -i
 ```
 
-### 1.2 安装成系统命令 `agent`
+### 1.3 无需源码安装（pipx / PyPI）
 
 ```bash
-# 开发模式安装（推荐，源码改动可立即生效）
-pip install -e .
+# 推荐：隔离安装（无需拉源码）
+pipx install smart-note-assistant
 
-# 或：普通安装
-# pip install .
+# 或：pip 安装
+# pip install smart-note-assistant
 
-agent --help
-agent doctor
-agent chat -i
+# 安装后验证
+noteai --help
+noteai init --dry-run --output json
+noteai init
+noteai doctor --output json
+noteai chat -m "你好" --output json
 ```
 
-> 若你之前安装过旧版本，建议先执行 `pip uninstall agent-cli` 后再重新安装。
+说明：
+- 默认运行目录为 `~/.noteai`。
+- 若当前目录已存在 `.env` 或 `data/`，会沿用当前目录（兼容旧用法）。
+- 可通过 `AGENT_HOME` 显式指定运行目录，例如：
+
+```bash
+AGENT_HOME=. noteai init
+AGENT_HOME=/path/to/agent-home noteai doctor --output json
+```
 
 ---
 
@@ -166,7 +177,7 @@ python -m uvicorn app_web:app --host 127.0.0.1 --port 8000 --reload
 
 访问：`http://127.0.0.1:8000`
 
-### 3.7 安装 / 使用 / 卸载 `agent` 命令
+### 3.7 安装 / 使用 / 卸载 `noteai` 命令
 
 #### 安装
 
@@ -175,30 +186,30 @@ python -m uvicorn app_web:app --host 127.0.0.1 --port 8000 --reload
 pip install -e .
 
 # 验证
-agent --version
-agent --help
+noteai --version
+noteai --help
 ```
 
 #### 使用
 
 ```bash
 # 等价于 python main.py chat -i
-agent chat -i
+noteai chat -i
 
 # 单次提问
-agent ask "列出我最近的 TODO"
+noteai ask "列出我最近的 TODO"
 
 # 重建索引（文本模式会实时输出过程）
-agent index-rebuild
+noteai index-rebuild
 
 # JSON 输出（便于脚本调用）
-agent doctor --output json
+noteai doctor --output json
 ```
 
 #### 卸载
 
 ```bash
-pip uninstall agent-cli
+pip uninstall smart-note-assistant
 ```
 
 可选清理（按需手动删除）：
@@ -265,17 +276,17 @@ python main.py index-rebuild
 python main.py doctor
 ```
 
-#### 方式 B：安装后使用 `agent` 命令
+#### 方式 B：安装后使用 `noteai` 命令
 
 ```bash
-agent chat -m "帮我总结本地笔记"
-agent chat --stdin
-agent ask "列出我最近的 TODO"
-agent files
-agent config
-agent metrics
-agent index-rebuild
-agent doctor
+noteai chat -m "帮我总结本地笔记"
+noteai chat --stdin
+noteai ask "列出我最近的 TODO"
+noteai files
+noteai config
+noteai metrics
+noteai index-rebuild
+noteai doctor
 ```
 
 别名：
@@ -292,10 +303,10 @@ python main.py ask "帮我总结" --output json
 python main.py files --output json
 python main.py doctor --output json
 
-# agent 方式
-agent ask "帮我总结" --output json
-agent files --output json
-agent doctor --output json
+# noteai 方式
+noteai ask "帮我总结" --output json
+noteai files --output json
+noteai doctor --output json
 ```
 
 ### 4.4 全局参数
@@ -312,10 +323,10 @@ python main.py --color always chat -i
 python main.py --quiet ask "今天待办"
 python main.py --verbose doctor
 
-# agent 方式
-agent --color always chat -i
-agent --quiet ask "今天待办"
-agent --verbose doctor
+# noteai 方式
+noteai --color always chat -i
+noteai --quiet ask "今天待办"
+noteai --verbose doctor
 ```
 
 ---

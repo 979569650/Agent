@@ -3,12 +3,7 @@ app_web.py
 main.py
 pyproject.toml
 rag_engine.py
-agent_cli.egg-info/PKG-INFO
-agent_cli.egg-info/SOURCES.txt
-agent_cli.egg-info/dependency_links.txt
-agent_cli.egg-info/entry_points.txt
-agent_cli.egg-info/requires.txt
-agent_cli.egg-info/top_level.txt
+cli/.env.example
 cli/__init__.py
 cli/fullscreen_terminal.py
 config/settings.py
@@ -26,6 +21,12 @@ infra/llm/openai_compatible.py
 infra/retrieval/model_reranker.py
 infra/retrieval/search_pipeline.py
 infra/retrieval/storage_utils.py
+smart_note_assistant.egg-info/PKG-INFO
+smart_note_assistant.egg-info/SOURCES.txt
+smart_note_assistant.egg-info/dependency_links.txt
+smart_note_assistant.egg-info/entry_points.txt
+smart_note_assistant.egg-info/requires.txt
+smart_note_assistant.egg-info/top_level.txt
 tests/test_cli_fullscreen_terminal.py
 tests/test_integration_agent_flow.py
 tests/test_main_cli_streaming.py

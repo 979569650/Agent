@@ -50,7 +50,7 @@ def main() -> int:
     hit_rate = (retrieval_hit / retrieval_count * 100.0) if retrieval_count else 0.0
     err_rate = (error_count / max(total, 1) * 100.0)
 
-    print("\n=== AgentLearn Metrics Dashboard ===")
+    print("\n=== 智能笔记助手 Metrics Dashboard ===")
     print(f"Log File           : {path}")
     print(f"Total Events       : {total}")
     print(f"Avg Latency (ms)   : {avg_latency:.2f}")

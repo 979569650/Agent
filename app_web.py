@@ -249,7 +249,7 @@ index_task_manager = IndexTaskManager(rag)
 security_ticket_store: dict[str, dict] = {}
 security_ticket_lock = threading.Lock()
 
-app = FastAPI(title="AgentLearn Web API", version="0.1.0")
+app = FastAPI(title="智能笔记助手 Web API", version="0.1.0")
 app.mount("/web", StaticFiles(directory=str(WEB_DIR)), name="web")
 
 

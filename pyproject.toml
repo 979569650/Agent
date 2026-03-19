@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-cli"
+name = "smart-note-assistant"
 version = "0.3.0"
-description = "本地智能笔记助理 CLI"
+description = "智能笔记助手 CLI"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-  { name = "Agent Project" }
+  { name = "智能笔记助手" }
 ]
 dependencies = [
   "openai",
@@ -34,10 +34,14 @@ dependencies = [
 ]
 
 [project.scripts]
-agent = "main:main"
+noteai = "main:main"
 
 [tool.setuptools]
 py-modules = ["main", "app_web", "rag_engine"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"cli" = [".env.example"]
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+from pathlib import Path
 import shutil
 import sys
 import time
@@ -19,7 +20,6 @@ from core.observability.logger import log_event
 from core.observability.metrics import runtime_metrics
 from core.security.frequency_guard import SlidingWindowFrequencyGuard
 from infra.llm.openai_compatible import OpenAICompatibleClient
-from rag_engine import RAGEngine
 from workflow.graph import build_app
 from workflow.nodes.agent_node import create_agent_node
 
@@ -164,23 +164,87 @@ def run_silenced(func, *args, **kwargs):
         return func(*args, **kwargs)
 
 
-def build_runtime() -> Tuple[Settings, RAGEngine, Any]:
-    load_dotenv()
+def _project_base_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def resolve_agent_home() -> Path:
+    configured = (os.getenv("AGENT_HOME") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    cwd = Path.cwd().resolve()
+    if (cwd / ".env").exists() or (cwd / "data").exists():
+        return cwd
+
+    return Path.home().joinpath(".noteai").resolve()
+
+
+def resolve_runtime_paths(agent_home: Optional[Path] = None) -> Dict[str, Path]:
+    base_dir = _project_base_dir()
+    home = (agent_home or resolve_agent_home()).resolve()
+    return {
+        "base_dir": base_dir,
+        "agent_home": home,
+        "env_file": home / ".env",
+        "env_example_fallback": base_dir / ".env.example",
+        "data_dir": home / "data",
+        "faiss_index_dir": home / "faiss_index",
+    }
+
+
+def _resolve_log_file_path(log_file: str, agent_home: Path) -> Path:
+    p = Path(log_file).expanduser()
+    if not p.is_absolute():
+        p = (agent_home / p).resolve()
+    return p
+
+
+def _read_env_example_text(runtime_paths: Optional[Dict[str, Path]] = None) -> Tuple[Optional[str], Optional[str]]:
+    paths = runtime_paths or resolve_runtime_paths()
+
+    try:
+        from importlib import resources
+
+        return resources.files("cli").joinpath(".env.example").read_text(encoding="utf-8"), "package:cli/.env.example"
+    except Exception:
+        fallback = paths["env_example_fallback"]
+        if fallback.exists():
+            return fallback.read_text(encoding="utf-8"), str(fallback)
+    return None, None
+
+
+def _get_rag_engine_class():
+    from rag_engine import RAGEngine
+
+    return RAGEngine
+
+
+def build_runtime(runtime_paths: Optional[Dict[str, Path]] = None) -> Tuple[Settings, Any, Any]:
+    RAGEngine = _get_rag_engine_class()
+
+    paths = runtime_paths or resolve_runtime_paths()
+    load_dotenv(paths["env_file"])
     settings = Settings.from_env()
+
+    resolved_log_file = _resolve_log_file_path(settings.log_file, paths["agent_home"])
+    settings.log_file = str(resolved_log_file)
+    os.environ["LOG_FILE"] = str(resolved_log_file)
+
     llm_client = OpenAICompatibleClient(settings)
     restricted_query_limiter = SlidingWindowFrequencyGuard(
         limit=settings.restricted_query_limit_per_minute,
         window_seconds=60,
     )
-    rag = RAGEngine()
+    rag = RAGEngine(data_dir=str(paths["data_dir"]), db_path=str(paths["faiss_index_dir"]))
     agent_node = create_agent_node(settings, llm_client, rag, restricted_query_limiter)
     app = build_app(agent_node)
     return settings, rag, app
 
 
-def safe_build_runtime():
+def safe_build_runtime(runtime_paths: Optional[Dict[str, Path]] = None):
     try:
-        runtime = run_silenced(build_runtime)
+        runtime = run_silenced(build_runtime, runtime_paths)
         return runtime, None
     except Exception as e:
         return None, e
@@ -198,7 +262,7 @@ def get_system_message() -> SystemMessage:
     )
 
 
-def gather_config(settings: Settings, rag: RAGEngine) -> Dict[str, Any]:
+def gather_config(settings: Settings, rag: Any) -> Dict[str, Any]:
     return {
         "model": settings.model_name,
         "base_url": settings.base_url,
@@ -223,7 +287,7 @@ def gather_metrics() -> Dict[str, Any]:
     }
 
 
-def gather_files(rag: RAGEngine) -> List[str]:
+def gather_files(rag: Any) -> List[str]:
     return rag.list_note_files()
 
 
@@ -307,7 +371,7 @@ def print_files_text(files: List[str]) -> None:
     out(format_files_text(files))
 
 
-def ensure_startup(settings: Settings, rag: RAGEngine) -> bool:
+def ensure_startup(settings: Settings, rag: Any) -> bool:
     try:
         settings.validate_startup()
     except Exception as e:
@@ -350,8 +414,8 @@ def _build_status_lines(settings: Settings, no_banner: bool = False) -> List[str
 
     lines: List[str] = [
         ui_divider(width=width),
-        ui_title("Agent CLI"),
-        ui_hint("本地智能笔记助理"),
+        ui_title("智能笔记助手 CLI"),
+        ui_hint("智能笔记助手"),
         f"{ui_badge(f'model {settings.model_name}')} {ui_badge(f'mode {settings.api_mode}')}",
         ui_kv("endpoint", endpoint),
         ui_hint("命令: help 查看帮助 · files/config/metrics/update · quit 退出"),
@@ -360,7 +424,7 @@ def _build_status_lines(settings: Settings, no_banner: bool = False) -> List[str
     return lines
 
 
-def stream_reindex_progress(rag: RAGEngine, on_line) -> None:
+def stream_reindex_progress(rag: Any, on_line) -> None:
     class _LiveWriter:
         def __init__(self, callback):
             self._callback = callback
@@ -397,7 +461,7 @@ def _is_interactive_command(user_input: str) -> bool:
 def _run_chat_command(
     user_input: str,
     settings: Settings,
-    rag: RAGEngine,
+    rag: Any,
     app,
     chat_history,
     on_progress_line: Optional[Callable[[str], None]] = None,
@@ -441,7 +505,7 @@ def _run_chat_command(
     }
 
 
-def run_chat_interactive_plain(settings: Settings, rag: RAGEngine, app, no_banner: bool = False) -> int:
+def run_chat_interactive_plain(settings: Settings, rag: Any, app, no_banner: bool = False) -> int:
     if not ensure_startup(settings, rag):
         return EXIT_GENERIC_ERROR
 
@@ -521,7 +585,7 @@ def run_chat_interactive_plain(settings: Settings, rag: RAGEngine, app, no_banne
             return EXIT_GENERIC_ERROR
 
 
-def run_chat_interactive_fullscreen(settings: Settings, rag: RAGEngine, app, no_banner: bool = False) -> int:
+def run_chat_interactive_fullscreen(settings: Settings, rag: Any, app, no_banner: bool = False) -> int:
     if not ensure_startup(settings, rag):
         return EXIT_GENERIC_ERROR
 
@@ -634,7 +698,7 @@ def resolve_fullscreen_mode(requested_mode: str):
     return False, ""
 
 
-def run_chat_entry(settings: Settings, rag: RAGEngine, app, no_banner: bool, fullscreen_mode: str) -> int:
+def run_chat_entry(settings: Settings, rag: Any, app, no_banner: bool, fullscreen_mode: str) -> int:
     use_fullscreen, fallback_msg = resolve_fullscreen_mode(fullscreen_mode)
     if fallback_msg:
         safe_print(ui_warn(fallback_msg), stream=sys.stderr)
@@ -644,11 +708,11 @@ def run_chat_entry(settings: Settings, rag: RAGEngine, app, no_banner: bool, ful
     return run_chat_interactive_plain(settings, rag, app, no_banner=no_banner)
 
 
-def run_chat_interactive(settings: Settings, rag: RAGEngine, app, no_banner: bool = False) -> int:
+def run_chat_interactive(settings: Settings, rag: Any, app, no_banner: bool = False) -> int:
     return run_chat_interactive_plain(settings, rag, app, no_banner=no_banner)
 
 
-def run_chat_once(settings: Settings, rag: RAGEngine, app, message: str, output: str) -> int:
+def run_chat_once(settings: Settings, rag: Any, app, message: str, output: str) -> int:
     if not ensure_startup(settings, rag):
         return EXIT_GENERIC_ERROR
 
@@ -668,7 +732,7 @@ def run_chat_once(settings: Settings, rag: RAGEngine, app, message: str, output:
         return EXIT_GENERIC_ERROR
 
 
-def run_doctor(settings: Optional[Settings], rag: Optional[RAGEngine], output: str, runtime_err: Exception = None) -> int:
+def run_doctor(settings: Optional[Settings], rag: Optional[Any], output: str, runtime_err: Exception = None) -> int:
     if runtime_err is not None or settings is None or rag is None:
         result = {
             "config_ok": False,
@@ -734,22 +798,24 @@ def resolve_chat_message(message_arg: str, use_stdin: bool) -> str:
     return (message_arg or "").strip()
 
 
-def run_init(force: bool, dry_run: bool, output: str) -> int:
-    example_path = os.path.join(os.getcwd(), ".env.example")
-    env_path = os.path.join(os.getcwd(), ".env")
+def run_init(force: bool, dry_run: bool, output: str, runtime_paths: Optional[Dict[str, Path]] = None) -> int:
+    paths = runtime_paths or resolve_runtime_paths()
+    agent_home = paths["agent_home"]
+    env_path = paths["env_file"]
 
-    if not os.path.exists(example_path):
-        msg = f"未找到模板文件: {example_path}"
+    example_text, example_source = _read_env_example_text(paths)
+    if not example_text:
+        msg = "未找到模板文件: .env.example（包内/仓库回退均不可用）"
         if output == "json":
             json_out({"ok": False, "error": msg})
         else:
             eprint(msg)
         return EXIT_GENERIC_ERROR
 
-    if os.path.exists(env_path) and not force:
+    if env_path.exists() and not force:
         msg = f".env 已存在: {env_path}（使用 --force 可覆盖）"
         if output == "json":
-            json_out({"ok": False, "error": msg, "env_path": env_path})
+            json_out({"ok": False, "error": msg, "env_path": str(env_path), "agent_home": str(agent_home)})
         else:
             eprint(msg)
         return EXIT_GENERIC_ERROR
@@ -758,51 +824,57 @@ def run_init(force: bool, dry_run: bool, output: str) -> int:
         result = {
             "ok": True,
             "dry_run": True,
-            "action": "copy",
-            "from": example_path,
-            "to": env_path,
-            "overwrite": os.path.exists(env_path),
+            "action": "write",
+            "from": example_source,
+            "to": str(env_path),
+            "overwrite": env_path.exists(),
+            "agent_home": str(agent_home),
         }
         if output == "json":
             json_out(result)
         else:
             out(ui_hint("dry-run: 将执行 .env 初始化"), force=True)
-            out(f"- {ui_label('from')} {example_path}", force=True)
+            out(f"- {ui_label('from')} {example_source}", force=True)
             out(f"- {ui_label('to')} {env_path}", force=True)
+            out(f"- {ui_label('agent_home')} {agent_home}", force=True)
         return EXIT_OK
 
-    shutil.copyfile(example_path, env_path)
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(example_text, encoding="utf-8")
+
     result = {
         "ok": True,
         "dry_run": False,
-        "action": "copied",
-        "from": example_path,
-        "to": env_path,
+        "action": "written",
+        "from": example_source,
+        "to": str(env_path),
+        "agent_home": str(agent_home),
     }
     if output == "json":
         json_out(result)
     else:
         out(ui_section(f"已生成 .env: {env_path}"), force=True)
+        out(ui_hint(f"运行目录: {agent_home}"), force=True)
     return EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="agent",
-        description="个人智能笔记助理 CLI",
+        prog="noteai",
+        description="智能笔记助手 CLI",
         epilog=(
             "示例:\n"
-            "  agent chat -i\n"
-            "  agent chat -m \"帮我总结本地笔记\"\n"
-            "  echo \"帮我看一下最近的会议记录\" | agent chat --stdin\n"
-            "  agent ask \"列出我有哪些项目TODO\"\n"
-            "  agent init --dry-run\n"
-            "  agent files --output json\n"
-            "  agent doctor"
+            "  noteai chat -i\n"
+            "  noteai chat -m \"帮我总结本地笔记\"\n"
+            "  echo \"帮我看一下最近的会议记录\" | noteai chat --stdin\n"
+            "  noteai ask \"列出我有哪些项目TODO\"\n"
+            "  noteai init --dry-run\n"
+            "  noteai files --output json\n"
+            "  noteai doctor"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version=f"agent {CLI_VERSION}")
+    parser.add_argument("--version", action="version", version=f"noteai {CLI_VERSION}")
 
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--quiet", action="store_true", help="精简输出（保留必要结果）")
@@ -874,19 +946,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     configure_stdio()
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     FLAGS.quiet = bool(getattr(args, "quiet", False))
     FLAGS.verbose = bool(getattr(args, "verbose", False))
     FLAGS.color_mode = str(getattr(args, "color", "auto"))
 
-    if args.command == "init":
-        return run_init(args.force, args.dry_run, args.output)
+    runtime_paths = resolve_runtime_paths()
 
-    runtime, runtime_err = safe_build_runtime()
+    if args.command == "init":
+        return run_init(args.force, args.dry_run, args.output, runtime_paths=runtime_paths)
+
+    runtime, runtime_err = safe_build_runtime(runtime_paths=runtime_paths)
 
     if runtime is None:
         if args.command == "doctor":
